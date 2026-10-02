@@ -41,8 +41,11 @@ run `Compress-Videos.bat` on a computer with internet, it downloads ffmpeg into 
 2. The window lists each file with what it will do: output resolution, frame rate, quality or
    bitrate, estimated size and a **quality grade** (Good / OK / Poor). Change the limit, quality,
    codec or speed and the preview updates immediately.
-3. Click **Start**. Compressed files are saved next to the originals as `name.compressed.mp4`
-   (or into a folder you choose). Originals are never modified.
+3. Click **Start**. Compressed files go into an **`Encoded`** folder next to each original, with the
+   same name (`Beach.mov` becomes `Encoded\Beach.mp4`). You can change the folder and the name, see
+   below. Originals are never modified or overwritten.
+4. Watch the two labelled progress bars at the bottom: **Current file** and **Whole queue**. Each
+   shows its percentage, the time elapsed, and an estimate of the time left.
 
 ## How the quality setting works
 
@@ -89,6 +92,61 @@ to squeeze to the limit. Many files will come out smaller and better than this.
 | 20 min  | 1280x720   | ~230 kbps      | Poor  |
 | 30 min+ | 1280x720   | under 150 kbps | Poor  |
 
+### Where the files go: folder and name templates
+
+The **Output folder** and **File name** boxes are templates, like HandBrake's auto-naming. Click
+**Variables...** to insert one where the cursor is. The grey **Example** line under the boxes shows
+the real path for the selected file as you type.
+
+| Variable | Becomes | Example |
+|----------|---------|---------|
+| `{source}` | original file name, without extension | `Beach` |
+| `{sourcefolder}` | name of the folder the original is in | `Holiday` |
+| `{date}` | date the batch started | `2026-10-02` |
+| `{time}` | time the batch started | `17-45-09` |
+| `{datetime}` | both | `2026-10-02_17-45-09` |
+| `{codec}` | `hevc` or `h264` | `hevc` |
+| `{quality}` | the Quality (RF) number | `32` |
+| `{mode}` | `quality` or `fill` | `quality` |
+| `{limit}` | the size limit | `40MB` |
+| `{width}` `{height}` | size of the compressed video | `1280` `720` |
+
+Examples:
+
+| Output folder | File name | Result for `D:\Clips\Holiday\Beach.mov` |
+|---------------|-----------|-----------------------------------------|
+| `Encoded` (default) | `{source}` (default) | `D:\Clips\Holiday\Encoded\Beach.mp4` |
+| *(empty)* | `{source}.compressed` | `D:\Clips\Holiday\Beach.compressed.mp4` |
+| `D:\Compressed\{date}` | `{source}_{height}p` | `D:\Compressed\2026-10-02\Beach_720p.mp4` |
+| `Encoded\{codec}` | `{sourcefolder} - {source}` | `D:\Clips\Holiday\Encoded\hevc\Holiday - Beach.mp4` |
+
+Rules:
+- A **relative** folder (like `Encoded`) is created next to *each* original, so a batch from several
+  folders gets an `Encoded` in every one. A **full path** (like `D:\Compressed`) is used as is.
+  Leave it empty to save next to the original.
+- The extension is always `.mp4`.
+- An existing file is **never overwritten**, and neither is the original: a number is added instead
+  (`Beach (2).mp4`).
+- Characters Windows does not allow in names are removed. A mistyped variable such as `{sorce}` is
+  flagged in red under the boxes and stops the run with a message that lists the valid ones; it is
+  never silently dropped.
+- If the folder cannot be created (for example the original is on read-only media) that file fails
+  with a message saying so. Choose a full path such as `C:\Videos\Encoded` in that case.
+- `{date}` and `{time}` are taken when you click Start, so a whole batch shares the same value.
+
+Your choices are remembered in `settings.json` (`outputFolder` and `fileName`). Settings files from
+older versions are converted automatically: the old "next to the original" choice becomes the new
+`Encoded` default, and an old custom folder or suffix is kept.
+
+### Elapsed time and time left
+
+Under each progress bar you see **Elapsed** and an estimate of the time left, for the current file and
+for the whole queue. The estimate is based on how fast your computer is actually encoding, and it
+corrects itself as it goes. It says *calculating...* for the first couple of seconds. In quality mode
+it can move around: if a file turns out too big at your quality setting, the tool switches to the
+two-pass fit and the estimate grows to match. Treat it as a guide, not a promise. The console shows the
+same information, and a final "Finished N files in 12:30" line.
+
 ### Options in the window
 
 | Option | Meaning |
@@ -99,7 +157,7 @@ to squeeze to the limit. Many files will come out smaller and better than this.
 | Max resolution | Auto, 1080p or 720p. Nothing lower is offered. |
 | Quality (RF) | See above. Default 32. |
 | Use the full size limit | Skips the quality attempt and always runs the two-pass encode. |
-| Save to | Next to the original, or a folder you pick. |
+| Output folder, File name | Templates for where each file goes and what it is called. See above. |
 | Also re-encode files already under the limit | Off by default: small files are skipped untouched. |
 
 Settings you change in the window are remembered in `settings.json` when you click Start.
@@ -114,6 +172,7 @@ You can also run it by hand:
 Compress-Videos.bat "D:\clips\a.mp4" "D:\clips\b.mov"
 powershell -ExecutionPolicy Bypass -File src\Main.ps1 -NoGui -TargetMB 25 -Quality 34 "D:\clips\a.mp4"
 powershell -ExecutionPolicy Bypass -File src\Main.ps1 -NoGui -Mode fill -Codec h264 "D:\clips\a.mp4"
+powershell -ExecutionPolicy Bypass -File src\Main.ps1 -NoGui -OutputFolder "D:\Compressed\{date}" -NameTemplate "{source}_{height}p" "D:\clips\a.mp4"
 ```
 
 ## How it decides

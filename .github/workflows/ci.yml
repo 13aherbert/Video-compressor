@@ -12,6 +12,7 @@ permissions:
 
 jobs:
   test-windows:
+    timeout-minutes: 25
     # Runs the real thing: Windows PowerShell 5.1 (what a locked-down work PC has) with the
     # downloaded static ffmpeg, including end-to-end encodes.
     runs-on: windows-latest
@@ -30,6 +31,7 @@ jobs:
         run: .\src\Main.ps1 -NoGui -NoPause -TargetMB 3 -Speed fast "tests\fixtures\clip 1080p30 (20s).mp4"
 
   test-linux:
+    timeout-minutes: 25
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -40,6 +42,7 @@ jobs:
         run: ./tests/Run-Tests.ps1
 
   package:
+    timeout-minutes: 25
     needs: [test-windows]
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest

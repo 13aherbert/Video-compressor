@@ -8,9 +8,8 @@
   "mode": "quality",
   "audioKbps": 96,
   "maxHeight": 0,
-  "outputMode": "nextToSource",
-  "outputFolder": "",
-  "outputSuffix": ".compressed",
+  "outputFolder": "Encoded",
+  "fileName": "{source}",
   "skipIfAlreadyUnderLimit": true,
   "maxRetries": 2
 }

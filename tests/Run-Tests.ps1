@@ -13,6 +13,7 @@ $srcCore = Join-Path (Join-Path (Split-Path -Parent $PSScriptRoot) 'src') 'Core'
 . (Join-Path $srcCore 'Probe.ps1')
 . (Join-Path $srcCore 'Plan.ps1')
 . (Join-Path $srcCore 'Encode.ps1')
+. (Join-Path $srcCore 'Eta.ps1')
 . (Join-Path (Split-Path -Parent $srcCore) 'Gui.ps1')   # only defines functions; no window is created
 
 $script:Pass = 0
@@ -129,35 +130,152 @@ $q = New-FFmpegArguments -Info (New-FakeInfo) -Plan $hevcPlan -Crf 32 -FileSizeL
 Assert-True (($q -contains '-crf') -and ($q -contains '32') -and ($q -contains '-fs') -and ($q -contains '40000000')) 'quality arguments: -crf and -fs'
 Assert-True ((-not ($q -contains '-b:v')) -and (-not ($q -contains '-pass')) -and ($q[-1] -eq 'out.mp4') -and ($q -contains 'hvc1')) 'quality arguments: single pass, no target bitrate'
 
-Write-Host 'window callbacks (tested without a window)'
+Write-Host 'output folder and file name templates'
+$tmpRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('vc-tests-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+$srcDir = Join-Path $tmpRoot 'Holiday'
+$workDir = Join-Path $tmpRoot 'Work'
+New-Item -ItemType Directory -Path $srcDir, $workDir -Force | Out-Null
+$src = Join-Path $srcDir 'Beach.mov'
+$fixedTime = [datetime]'2026-10-02T17:45:09'
+$tplPlan = [PSCustomObject]@{ OutWidth = 1280; OutHeight = 720 }
+function Get-Loc { param([hashtable]$Overrides = @{}, [string]$Path = $src, $Plan = $tplPlan)
+    return Resolve-OutputLocation -InputPath $Path -Settings (New-TestSettings $Overrides) -Plan $Plan -BatchTime $fixedTime }
+$sep = [string][System.IO.Path]::DirectorySeparatorChar
+
+Assert-True ((Get-DefaultSettings).outputFolder -eq 'Encoded' -and (Get-DefaultSettings).fileName -eq '{source}') 'defaults: Encoded folder, {source} name'
+Assert-True ((Get-Loc).Path -eq (Join-Path (Join-Path $srcDir 'Encoded') 'Beach.mp4')) "default goes to an Encoded folder next to the original ($((Get-Loc).Path))"
+Assert-True ((Get-Loc @{ outputFolder = '' }).Path -eq (Join-Path $srcDir 'Beach.mp4')) 'empty folder template means next to the original'
+$vars = '{source}_{sourcefolder}_{date}_{time}_{datetime}_{codec}_{quality}_{mode}_{limit}_{width}x{height}'
+Assert-True ((Get-Loc @{ fileName = $vars }).BaseName -eq 'Beach_Holiday_2026-10-02_17-45-09_2026-10-02_17-45-09_hevc_32_quality_40MB_1280x720') 'every variable resolves'
+Assert-True ((Get-Loc @{ fileName = '{codec}_{quality}_{mode}_{limit}'; codec = 'h264'; quality = 28; mode = 'fill'; targetMB = 1.5 }).BaseName -eq 'h264_28_fill_1.5MB') 'codec, quality, mode and limit follow the settings'
+Assert-True ((Get-Loc @{ fileName = '{SOURCE}-{Date}' }).BaseName -eq 'Beach-2026-10-02') 'variable names are not case sensitive'
+Assert-True ((Get-Loc @{ fileName = '{width}x{height}' } -Plan $null).BaseName -eq 'x') 'width and height are empty when no plan is known yet'
+Assert-True ((Get-Loc @{ outputFolder = (Join-Path (Join-Path $tmpRoot 'Out') '{date}') }).Folder -eq (Join-Path (Join-Path $tmpRoot 'Out') '2026-10-02')) 'an absolute folder is used as is, with variables'
+Assert-True ((Get-Loc @{ outputFolder = 'Encoded\{codec}/{quality}' }).Folder -eq (Join-Path (Join-Path (Join-Path $srcDir 'Encoded') 'hevc') '32')) 'relative sub-folders with either slash'
+Assert-True ((Get-Loc @{ outputFolder = '..\Out2' }).Folder -eq (Join-Path $tmpRoot 'Out2')) 'a relative folder can go up a level'
+$bad = Get-Loc @{ outputFolder = 'En:co<d>e|d"?'; fileName = 'Be*ach<>|"' }
+Assert-True ($bad.Folder -eq (Join-Path $srcDir 'Encoded') -and $bad.BaseName -eq 'Beach') "forbidden characters are removed ($($bad.Path))"
+Assert-True ((Get-Loc @{ fileName = 'NUL' }).BaseName -eq '_NUL') 'Windows device names are defused'
+Assert-True ((Get-Loc @{ fileName = '   ' }).BaseName -eq 'Beach') 'an empty name falls back to the original name'
+Assert-True ((Get-Loc @{ fileName = 'a/b\c' }).BaseName -eq 'a_b_c') 'slashes in the file name become underscores'
+Assert-True ((Get-Loc @{ fileName = ('x' * 300) }).Path.Length -le 245) 'very long names are shortened to stay under the Windows path limit'
+$work = Join-Path $workDir 'Meeting.mp4'
+Assert-True ((Get-Loc @{} -Path $work).Folder -eq (Join-Path $workDir 'Encoded') -and (Get-Loc).Folder -eq (Join-Path $srcDir 'Encoded')) 'each original gets its own Encoded folder'
+$unk = Get-Loc @{ outputFolder = 'Encoded\{foo}'; fileName = '{source}_{Bar}' }
+Assert-True (($unk.Unknown -contains '{foo}') -and ($unk.Unknown -contains '{Bar}')) 'unknown variables are reported'
+$threw = ''
+try { Get-OutputPath -InputPath $src -Settings (New-TestSettings @{ fileName = '{oops}' }) -BatchTime $fixedTime | Out-Null } catch { $threw = $_.Exception.Message }
+Assert-True ($threw -match 'Unknown variable' -and $threw -match '\{oops\}' -and $threw -match '\{source\}') 'an unknown variable stops the file with a message listing the valid ones'
+Assert-True ((Get-TemplateVariables | ForEach-Object { $_.Name }) -join ',' -eq 'source,sourcefolder,date,time,datetime,codec,quality,mode,limit,width,height') 'the variable list the window shows'
+
+$made = Get-OutputPath -InputPath $src -Settings (New-TestSettings @{}) -Plan $tplPlan -BatchTime $fixedTime
+Assert-True ((Test-Path -LiteralPath (Split-Path -Parent $made)) -and $made -eq (Join-Path (Join-Path $srcDir 'Encoded') 'Beach.mp4')) 'Get-OutputPath creates the Encoded folder'
+Set-Content -LiteralPath $made -Value 'existing'
+$again = Get-OutputPath -InputPath $src -Settings (New-TestSettings @{}) -Plan $tplPlan -BatchTime $fixedTime
+Assert-True ($again -eq (Join-Path (Join-Path $srcDir 'Encoded') 'Beach (2).mp4')) "an existing file is never overwritten ($([System.IO.Path]::GetFileName($again)))"
+$original = Join-Path $srcDir 'clip.mp4'
+Set-Content -LiteralPath $original -Value 'original'
+$sameFolder = Get-OutputPath -InputPath $original -Settings (New-TestSettings @{ outputFolder = '' }) -BatchTime $fixedTime
+Assert-True ($sameFolder -ne $original -and $sameFolder -eq (Join-Path $srcDir 'clip (2).mp4')) 'saving next to the original never overwrites the original'
+$blocker = Join-Path $tmpRoot 'blocker'
+Set-Content -LiteralPath $blocker -Value 'a file, not a folder'
+$threw = ''
+try { Get-OutputPath -InputPath $src -Settings (New-TestSettings @{ outputFolder = (Join-Path $blocker 'sub') }) -BatchTime $fixedTime | Out-Null } catch { $threw = $_.Exception.Message }
+Assert-True ($threw -match 'Could not create the output folder' -and $threw -match 'full folder path') 'an unusable folder gives a clear message'
+
+Write-Host 'settings from older versions'
+function Read-TestSettings { param([string]$Json) $f = Join-Path $tmpRoot ([guid]::NewGuid().ToString('N') + '.json'); Set-Content -LiteralPath $f -Value $Json -Encoding UTF8; return (Get-Settings -Path $f) }
+$m = Read-TestSettings '{ "outputMode": "nextToSource", "outputFolder": "", "outputSuffix": ".compressed", "targetMB": 25 }'
+Assert-True ($m.outputFolder -eq 'Encoded' -and $m.fileName -eq '{source}' -and $m.targetMB -eq 25) 'old default (next to the original) becomes the Encoded default; other settings are kept'
+$m = Read-TestSettings '{ "outputMode": "folder", "outputFolder": "D:\\Compressed", "outputSuffix": ".small" }'
+Assert-True ($m.outputFolder -eq 'D:\Compressed' -and $m.fileName -eq '{source}.small') 'an old explicit folder and suffix are carried over'
+$m = Read-TestSettings '{ "outputFolder": "", "fileName": "{source}_x" }'
+Assert-True ($m.outputFolder -eq '' -and $m.fileName -eq '{source}_x') 'new-style settings are not migrated (an empty folder stays empty)'
+$m = Read-TestSettings '{ "targetMB": 30 }'
+Assert-True ($m.outputFolder -eq 'Encoded' -and $m.fileName -eq '{source}') 'missing keys use the defaults'
+Remove-Item -LiteralPath $tmpRoot -Recurse -Force -ErrorAction SilentlyContinue
+
+Write-Host 'time estimates (simulated clock)'
+Assert-True ((Format-Clock 1e12) -eq '100000:00:00') 'a silly-large time does not crash'
+Assert-True ((Format-Clock 42) -eq '0:42' -and (Format-Clock 725) -eq '12:05' -and (Format-Clock 3723) -eq '1:02:03') 'clock format'
+Assert-True ((Format-Eta $null) -eq 'calculating...' -and (Format-Eta 2) -eq 'a few seconds' -and (Format-Eta 63) -eq 'about 1:05' -and (Format-Eta 100000) -eq 'about 27:47:00') 'estimate wording and rounding'
+Assert-True ((Format-EtaLine 44 40) -eq 'Elapsed 0:44   About 0:40 left' -and (Format-EtaLine 3 $null) -eq 'Elapsed 0:03   Time left: calculating...') 'estimate line'
+$t = New-EtaTracker -Durations @(60) -Mode fill -At 0
+Start-EtaFile $t 0 -At 0
+Update-EtaProgress $t 1 5 -At 1
+$sn = Get-EtaSnapshot $t -At 1
+Assert-True ($null -eq $sn.FileRemaining -and $null -eq $sn.QueueRemaining -and $sn.FileElapsed -eq 1) 'calculating... until there is enough to go on, elapsed time runs from the start'
+Update-EtaProgress $t 1 50 -At 10
+$sn = Get-EtaSnapshot $t -At 10
+Assert-True ([math]::Abs($sn.FileRemaining - 30) -lt 0.01 -and $sn.FilePercent -eq 25) "halfway through pass 1 of 2: 30 s left (got $($sn.FileRemaining))"
+Update-EtaProgress $t 1 100 -At 20; Update-EtaProgress $t 2 25 -At 25
+$sn = Get-EtaSnapshot $t -At 25
+Assert-True ([math]::Abs($sn.FileRemaining - 15) -lt 0.01 -and [math]::Abs($sn.QueueRemaining - 15) -lt 0.01) 'a quarter into pass 2: 15 s left for the file and the queue'
+
+$t = New-EtaTracker -Durations @(60, 60, 120) -Mode fill -At 0
+Start-EtaFile $t 0 -At 0; Update-EtaProgress $t 1 100 -At 20; Update-EtaProgress $t 2 100 -At 40; Complete-EtaFile $t -At 40
+$sn = Get-EtaSnapshot $t -At 40
+Assert-True ([math]::Abs($sn.QueueRemaining - 120) -lt 0.01 -and $sn.QueuePercent -eq 25 -and -not $sn.Running) 'between files: 3 x remaining work at the measured speed'
+Start-EtaFile $t 1 -At 40; Update-EtaProgress $t 1 10 -At 44
+$sn = Get-EtaSnapshot $t -At 44
+Assert-True ([math]::Abs($sn.QueueRemaining - 123.62) -lt 0.1 -and $sn.QueueElapsed -eq 44 -and $sn.FileElapsed -eq 4) "queue estimate includes the unstarted longer file (got $([math]::Round($sn.QueueRemaining, 1)))"
+Assert-True ($sn.QueuePercent -gt 25 -and $sn.QueuePercent -lt 40) 'queue percentage is weighted by video length'
+
+$t = New-EtaTracker -Durations @(100, 100) -Mode quality -At 0
+Start-EtaFile $t 0 -At 0; Update-EtaProgress $t 0 20 -At 10
+$sn = Get-EtaSnapshot $t -At 10
+Assert-True ([math]::Abs($sn.FileRemaining - 65) -lt 0.01) "quality attempt: rest of it plus the expected extra for a fallback (got $($sn.FileRemaining))"
+Update-EtaProgress $t 0 50 -At 25                       # the attempt gives up at 50 %
+Update-EtaProgress $t 1 0 -At 25
+$sn = Get-EtaSnapshot $t -At 25
+Assert-True ([math]::Abs($sn.FileRemaining - 100) -lt 0.01) "fallback started: the estimate switches to two passes (got $($sn.FileRemaining))"
+Complete-EtaFile $t -At 100 -Learn $false
+$t2 = New-EtaTracker -Durations @(100, 100, 100) -Mode quality -At 0
+Start-EtaFile $t2 0 -At 0; Update-EtaProgress $t2 0 100 -At 50; Complete-EtaFile $t2 -At 50
+Assert-True ((Get-EtaExpectedPasses $t2) -eq 1) 'a file that fitted first time teaches the average (1 pass)'
+Assert-True ((Get-EtaExpectedPasses $t) -eq 1.5) 'a cancelled or failed file does not change the average'
+$sn = Get-EtaSnapshot $t2 -At 50
+Assert-True ([math]::Abs($sn.QueueRemaining - 100) -lt 0.01) 'two files of 100 s left at 2 pass-seconds per second'
+
+Write-Host 'window text and callbacks (tested without a window)'
 $pumped = @{ N = 0 }
-$fakeUi = @{
-    BarFile   = [PSCustomObject]@{ Value = 0 }
-    BarAll    = [PSCustomObject]@{ Value = 0 }
-    Status    = [PSCustomObject]@{ Text = '' }
-    Pump      = { $pumped.N++ }.GetNewClosure()
-    LastError = ''
+function New-FakeUi {
+    return @{
+        BarFile = [PSCustomObject]@{ Value = 0 }; BarAll = [PSCustomObject]@{ Value = 0 }
+        CapFile = [PSCustomObject]@{ Text = '' }; CapAll = [PSCustomObject]@{ Text = '' }
+        DetFile = [PSCustomObject]@{ Text = '' }; DetAll = [PSCustomObject]@{ Text = '' }
+        Status  = [PSCustomObject]@{ Text = '' }
+        Pump    = { $pumped.N++ }.GetNewClosure()
+        LastError = ''
+    }
 }
+$fakeUi = New-FakeUi
 $fakeItem = @{
     Status = ''
     Row    = [PSCustomObject]@{ SubItems = @(1..9 | ForEach-Object { [PSCustomObject]@{ Text = '' } }) }
     Info   = [PSCustomObject]@{ FileName = 'a.mp4' }
 }
+$cbTracker = New-EtaTracker -Durations @(60, 60, 60, 60) -Mode fill     # real clock: the callback reads it itself
+Start-EtaFile $cbTracker 0; Update-EtaProgress $cbTracker 2 100; Update-EtaProgress $cbTracker 1 100; Complete-EtaFile $cbTracker
+Start-EtaFile $cbTracker 1
 # Same shape as the real thing: the callback is built in one function and called from another that
 # the encoder runs, so any reliance on the builder's caller's variables would fail here.
 function Invoke-FakeEncoder { param([scriptblock]$OnProgress) & $OnProgress 25 1 '2.0x'; & $OnProgress 50 2 '1.5x'; & $OnProgress 100 0 '3.0x' }
-function Start-FakeBatch { $cb = New-GuiProgressCallback -Ui $fakeUi -Item $fakeItem -Index 1 -Total 4 -Quality 32; Invoke-FakeEncoder $cb }
+function Start-FakeBatch { $cb = New-GuiProgressCallback -Ui $fakeUi -Item $fakeItem -Index 1 -Total 4 -Quality 32 -Tracker $cbTracker; Invoke-FakeEncoder $cb }
 Start-FakeBatch
 Assert-True ($fakeUi.LastError -eq '') "progress callback ran without errors ($($fakeUi.LastError))"
-Assert-True ($fakeUi.BarFile.Value -eq 100) 'file progress bar updated'
-Assert-True ($fakeUi.BarAll.Value -eq 50) "overall progress bar updated (got $($fakeUi.BarAll.Value))"
+Assert-True ($fakeUi.BarFile.Value -eq 100 -and $fakeUi.CapFile.Text -eq 'Current file: 100 %') "file bar and its label: $($fakeUi.BarFile.Value), '$($fakeUi.CapFile.Text)'"
+Assert-True ($fakeUi.BarAll.Value -eq 50 -and $fakeUi.CapAll.Text -eq 'Whole queue: file 2 of 4, 50 %') "queue bar and its label: $($fakeUi.BarAll.Value), '$($fakeUi.CapAll.Text)'"
+Assert-True ($fakeUi.DetFile.Text -like 'Elapsed *' -and $fakeUi.DetAll.Text -like 'Elapsed *') "elapsed and remaining lines: '$($fakeUi.DetFile.Text)' / '$($fakeUi.DetAll.Text)'"
 Assert-True ($fakeUi.Status.Text -eq 'File 2 of 4: a.mp4  (quality RF 32, 3.0x)') "status text: '$($fakeUi.Status.Text)'"
 Assert-True ($fakeItem.Row.SubItems[8].Text -eq 'encoding 100% (3.0x)') 'row status text updated'
 Assert-True ($pumped.N -eq 3) 'window repainted on every update'
+Set-GuiIdle $fakeUi
+Assert-True ($fakeUi.CapFile.Text -eq 'Current file' -and $fakeUi.CapAll.Text -eq 'Whole queue' -and $fakeUi.DetFile.Text -eq '' -and $fakeUi.BarAll.Value -eq 0) 'idle state of the progress area'
 
-$brokenUi = @{ BarFile = $null; BarAll = $null; Status = $null; Pump = { }; LastError = '' }
+$brokenUi = @{ BarFile = $null; BarAll = $null; CapFile = $null; CapAll = $null; DetFile = $null; DetAll = $null; Status = $null; Pump = { }; LastError = '' }
 $errorEscaped = $false
-try { $cb = New-GuiProgressCallback -Ui $brokenUi -Item $fakeItem -Index 0 -Total 1 -Quality 32; & $cb 10 2 '1x' } catch { $errorEscaped = $true }
+try { $cb = New-GuiProgressCallback -Ui $brokenUi -Item $fakeItem -Index 0 -Total 1 -Quality 32 -Tracker $cbTracker; & $cb 10 2 '1x' } catch { $errorEscaped = $true }
 Assert-True (-not $errorEscaped) 'a window problem never aborts an encode'
 Assert-True ($brokenUi.LastError -ne '') 'the window problem is recorded for the log'
 
@@ -166,6 +284,12 @@ $check = New-GuiCancelCheck -Ui $fakeUi -State $cancelState
 Assert-True ((& $check) -eq $false) 'cancel check is false at first'
 $cancelState.Cancel = $true
 Assert-True ((& $check) -eq $true) 'cancel check turns true after Cancel is clicked'
+
+$conTracker = New-EtaTracker -Durations @(60) -Mode quality
+Start-EtaFile $conTracker 0
+$conErr = $null
+try { $cb = New-ConsoleProgressCallback -Tracker $conTracker -Activity 'Test' -Position 1 -Total 1; & $cb 40 0 '2x'; Write-Progress -Activity 'Test' -Completed } catch { $conErr = $_.Exception.Message }
+Assert-True ($null -eq $conErr) "console progress callback ran ($conErr)"
 
 Write-Host 'helpers'
 Assert-True ((ConvertTo-Fps '30000/1001') -eq 29.97) 'fps 30000/1001'
@@ -197,7 +321,7 @@ function Test-Encode {
     # -Via twopass runs the fill-the-limit encoder directly; -Via compress runs the app entry point
     # (quality first, falls back to two-pass). -ExpectMethod checks which path produced the file.
     param([string]$Name, [hashtable]$Overrides = @{}, [string]$Via = 'twopass', [string]$ExpectMethod = '')
-    $merged = @{ targetMB = 3; speed = 'fast'; outputMode = 'folder'; outputFolder = $outDir }
+    $merged = @{ targetMB = 3; speed = 'fast'; outputFolder = $outDir; fileName = '{source}.compressed' }
     foreach ($key in $Overrides.Keys) { $merged[$key] = $Overrides[$key] }   # overrides win
     $settings = New-TestSettings $merged
     $path = Join-Path $fixtures $Name
@@ -258,16 +382,16 @@ $r = Test-Encode 'noisy 720p 8s.mp4' @{ mode = 'quality'; targetMB = 1.5 } 'comp
 Assert-True (@(Get-ChildItem -LiteralPath $outDir -Filter 'noisy*').Count -eq 1) 'exactly one output file, no partial leftovers'
 
 Write-Host 'fill mode goes straight to two-pass'
-$r = Test-Encode 'silent 720p60 10s.mp4' @{ mode = 'fill'; outputSuffix = '.fill' } 'compress' 'twopass'
+$r = Test-Encode 'silent 720p60 10s.mp4' @{ mode = 'fill'; fileName = '{source}.fill' } 'compress' 'twopass'
 
 Write-Host 'output name collision'
-$settings = New-TestSettings @{ outputMode = 'folder'; outputFolder = $outDir }
+$settings = New-TestSettings @{ outputFolder = $outDir; fileName = '{source}.compressed' }
 $p1 = Get-OutputPath -InputPath (Join-Path $fixtures 'clip 1080p30 (20s).mp4') -Settings $settings
 Assert-True (([System.IO.Path]::GetFileName($p1) -match '^clip 1080p30 \(20s\)\.compressed \(\d+\)\.mp4$') -and -not (Test-Path -LiteralPath $p1)) "an existing output is never overwritten; next free name is used ($([System.IO.Path]::GetFileName($p1)))"
 
 foreach ($cancelMode in 'fill', 'quality') {
     Write-Host "cancel stops ffmpeg and leaves no output ($cancelMode mode)"
-    $settings = New-TestSettings @{ targetMB = 3; speed = 'fast'; mode = $cancelMode; outputMode = 'folder'; outputFolder = $outDir; outputSuffix = ".cancelled-$cancelMode" }
+    $settings = New-TestSettings @{ targetMB = 3; speed = 'fast'; mode = $cancelMode; outputFolder = $outDir; fileName = "{source}.cancelled-$cancelMode" }
     $info = Get-VideoInfo -Path (Join-Path $fixtures 'clip 1080p30 (20s).mp4')
     $plan = New-EncodePlan -Info $info -Settings $settings
     $out = Get-OutputPath -InputPath $info.Path -Settings $settings
@@ -275,6 +399,74 @@ foreach ($cancelMode in 'fill', 'quality') {
     $result = Invoke-CompressVideo -Info $info -Plan $plan -OutputPath $out -Settings $settings -ShouldCancel { $ticks.N++; return ($ticks.N -ge 2) }
     Assert-True ($result.Status -eq 'Cancelled') "status Cancelled (got $($result.Status))"
     Assert-True (-not (Test-Path -LiteralPath $out)) 'no partial output left behind'
+}
+
+Write-Host 'console mode with the output flags and time estimates'
+$script:SettingsPathOverride = Join-Path $outDir 'test-settings.json'     # nothing below may touch the real settings.json
+$conRoot = Join-Path $outDir 'console'
+$conSrcDir = Join-Path $conRoot 'Fix'
+New-Item -ItemType Directory -Path $conSrcDir -Force | Out-Null
+$conClip = Join-Path $conSrcDir 'Silent.mp4'
+Copy-Item -LiteralPath (Join-Path $fixtures 'silent 720p60 10s.mp4') -Destination $conClip
+$hostExe = (Get-Process -Id $PID).Path
+$mainScript = Join-Path (Split-Path -Parent $srcCore) 'Main.ps1'
+$hostArgs = @('-NoProfile')
+if (Test-IsWindows) { $hostArgs += @('-ExecutionPolicy', 'Bypass') }
+$hostArgs += @('-File', $mainScript, '-NoGui', '-NoPause', '-TargetMB', '3', '-Speed', 'fast',
+               '-OutputFolder', (Join-Path (Join-Path $conRoot 'Out') '{sourcefolder}'), '-NameTemplate', '{source}_RF{quality}_{height}p', $conClip)
+$prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+$conOutput = (& $hostExe @hostArgs 2>&1 | ForEach-Object { "$_" }) -join "`n"
+$conExit = $LASTEXITCODE
+$ErrorActionPreference = $prevEap
+$conExpected = Join-Path (Join-Path (Join-Path $conRoot 'Out') 'Fix') 'Silent_RF32_720p.mp4'
+Assert-True ($conExit -eq 0) "console run exits cleanly (exit code $conExit)"
+Assert-True (Test-Path -LiteralPath $conExpected) "output went to the folder and name built from the variables ($conExpected)"
+Assert-True ($conOutput -match 'output: ') 'the planned output path is shown before encoding'
+Assert-True ($conOutput -match 'Finished 1 file\(s\) in \d+:\d\d') 'the console reports the total time'
+Assert-True ($conOutput -match 'done: .* in \d+:\d\d ->') 'each file reports how long it took'
+if (-not (Test-Path -LiteralPath $conExpected)) { Write-Host $conOutput }
+
+if ((Test-IsWindows) -and $ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage') {
+    Write-Host 'the real window, driven end to end (Windows only)'
+    $guiReady = $true
+    try { Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing }
+    catch { $guiReady = $false; Write-Host "  skipped: Windows Forms is not available ($($_.Exception.Message))" }
+    if ($guiReady) {
+        $guiDir = Join-Path $outDir 'gui'
+        New-Item -ItemType Directory -Path $guiDir -Force | Out-Null
+        $guiClip = Join-Path $guiDir 'Clip.mp4'
+        Copy-Item -LiteralPath (Join-Path $fixtures 'clip 1080p30 (20s).mp4') -Destination $guiClip
+        $guiSettings = New-TestSettings @{ targetMB = 3; speed = 'fast'; fileName = '{source}_{height}p' }
+        $seen = @{}
+        try {
+            Show-CompressorWindow -Files @() -Settings $guiSettings -Automation {
+                param($w)
+                $seen.MenuItems = $w.Controls.Menu.Items.Count
+                $seen.IdleCaption = $w.Controls.CapAll.Text
+                & $w.AddPaths @($guiClip)
+                $seen.Added = $w.State.Items.Count
+                $seen.Example = $w.Controls.Example.Text
+                & $w.StartBatch
+                $seen.Status = $w.State.Items[0].Status
+                $seen.CapFile = $w.Controls.CapFile.Text
+                $seen.CapAll = $w.Controls.CapAll.Text
+                $seen.DetAll = $w.Controls.DetAll.Text
+                $seen.BarAll = $w.Controls.BarAll.Value
+                $seen.UiError = $w.Ui.LastError
+                $w.Controls.FileName.Text = '{nope}'
+                $seen.BadExample = $w.Controls.Example.Text
+            }
+        } catch { $seen.Error = $_.Exception.Message }
+        Assert-True (-not $seen.ContainsKey('Error')) "the window ran a whole batch without an error ($($seen.Error))"
+        Assert-True ($seen.MenuItems -eq 11 -and $seen.IdleCaption -eq 'Whole queue') 'the Variables menu lists 11 variables; idle caption'
+        Assert-True ($seen.Added -eq 1 -and $seen.Example -like '*Encoded*Clip_720p.mp4') "live example before starting: $($seen.Example)"
+        Assert-True ($seen.Status -like 'Done*') "file finished: $($seen.Status)"
+        Assert-True (Test-Path -LiteralPath (Join-Path (Join-Path $guiDir 'Encoded') 'Clip_720p.mp4')) 'output is in the Encoded folder next to the original'
+        Assert-True ($seen.CapFile -eq 'Current file' -and $seen.CapAll -like 'Whole queue: finished*' -and $seen.BarAll -eq 100) "captions and bars after the batch: '$($seen.CapAll)', bar $($seen.BarAll)"
+        Assert-True ($seen.DetAll -like 'Elapsed *') "elapsed time shown at the end: '$($seen.DetAll)'"
+        Assert-True ($seen.UiError -eq '') "no window update errors ($($seen.UiError))"
+        Assert-True ($seen.BadExample -like '*Unknown variable*{nope}*') 'an unknown variable is flagged in the example line'
+    }
 }
 
 Write-Host "`nPassed: $script:Pass  Failed: $script:Fail"

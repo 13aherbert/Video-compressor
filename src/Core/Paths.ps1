@@ -46,22 +46,189 @@ function Remove-JobTempDir {
     }
 }
 
-function Get-OutputPath {
+# ---------------------------------------------------------------- output folder / name templates
+# The output folder and the file name are templates with {variables}, like HandBrake's auto-naming.
+# Resolve-OutputLocation is pure (no disk access) so the window can preview it as you type;
+# Get-OutputPath adds the disk work: create the folder and never overwrite an existing file.
+
+$script:TemplateVariables = @(
+    @{ Name = 'source';       Example = 'Beach';             Help = 'original file name, without extension' }
+    @{ Name = 'sourcefolder'; Example = 'Holiday';           Help = 'name of the folder the original is in' }
+    @{ Name = 'date';         Example = '2026-10-02';        Help = 'date the batch started' }
+    @{ Name = 'time';         Example = '17-45-09';          Help = 'time the batch started' }
+    @{ Name = 'datetime';     Example = '2026-10-02_17-45-09'; Help = 'date and time the batch started' }
+    @{ Name = 'codec';        Example = 'hevc';              Help = 'hevc or h264' }
+    @{ Name = 'quality';      Example = '32';                Help = 'the Quality (RF) number' }
+    @{ Name = 'mode';         Example = 'quality';           Help = 'quality or fill' }
+    @{ Name = 'limit';        Example = '40MB';              Help = 'the size limit' }
+    @{ Name = 'width';        Example = '1280';              Help = 'width of the compressed video' }
+    @{ Name = 'height';       Example = '720';               Help = 'height of the compressed video' }
+)
+
+function Get-TemplateVariables { return $script:TemplateVariables }
+
+function Remove-InvalidNameChars {
+    # Characters Windows does not allow in a file or folder name (and control characters).
+    param([string]$Text, [string]$Replacement = '')
+    return [regex]::Replace($Text, '[\\/:*?"<>|\x00-\x1f]', $Replacement)
+}
+
+function ConvertTo-SafeSegment {
+    # One folder or file name: forbidden characters removed, trailing dots/spaces trimmed, device names defused.
+    param([string]$Text)
+    $t = (Remove-InvalidNameChars $Text).Trim().TrimEnd('.', ' ')
+    if ($t -match '^(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\..*)?$') { $t = '_' + $t }
+    return $t
+}
+
+function Get-TemplateContext {
     param(
         [Parameter(Mandatory = $true)][string]$InputPath,
-        [Parameter(Mandatory = $true)]$Settings
+        [Parameter(Mandatory = $true)]$Settings,
+        $Plan = $null,
+        [datetime]$BatchTime = (Get-Date)
     )
-    $base = [System.IO.Path]::GetFileNameWithoutExtension($InputPath)
-    $suffix = [string]$Settings.outputSuffix
-    $dir = Split-Path -Parent $InputPath
-    if ($Settings.outputMode -eq 'folder' -and -not [string]::IsNullOrWhiteSpace([string]$Settings.outputFolder)) {
-        $dir = [string]$Settings.outputFolder
-        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $dir = [System.IO.Path]::GetDirectoryName($InputPath)
+    $folderName = ''
+    if ($dir) {
+        $folderName = Split-Path -Leaf $dir
+        if (-not $folderName) { $folderName = ($dir -replace '[\\/:]', '') }   # a drive root such as C:\
     }
-    $candidate = Join-Path $dir ($base + $suffix + '.mp4')
+    $codec = 'hevc'
+    if ("$($Settings.codec)" -match '264|avc') { $codec = 'h264' }
+    $mode = 'quality'
+    if ("$($Settings.mode)".ToLowerInvariant() -eq 'fill') { $mode = 'fill' }
+    $width = ''; $height = ''
+    if ($null -ne $Plan -and $null -ne $Plan.PSObject.Properties['OutWidth']) {
+        $width = "$($Plan.OutWidth)"; $height = "$($Plan.OutHeight)"
+    }
+    return @{
+        source       = [System.IO.Path]::GetFileNameWithoutExtension($InputPath)
+        sourcefolder = $folderName
+        date         = $BatchTime.ToString('yyyy-MM-dd', $inv)
+        time         = $BatchTime.ToString('HH-mm-ss', $inv)
+        datetime     = $BatchTime.ToString('yyyy-MM-dd_HH-mm-ss', $inv)
+        codec        = $codec
+        quality      = "$([int][math]::Round([double]$Settings.quality))"
+        mode         = $mode
+        limit        = ("{0}MB" -f ([double]$Settings.targetMB).ToString('0.##', $inv))
+        width        = $width
+        height       = $height
+    }
+}
+
+function Expand-TemplateText {
+    # Replaces {variables} with their (sanitised) values. Unknown variables are collected, not dropped.
+    param([string]$Template, [hashtable]$Context)
+    $unknown = New-Object System.Collections.Generic.List[string]
+    $sb = New-Object System.Text.StringBuilder
+    $last = 0
+    foreach ($m in [regex]::Matches($Template, '\{([^{}\\/]*)\}')) {
+        [void]$sb.Append($Template.Substring($last, $m.Index - $last))
+        $name = $m.Groups[1].Value.Trim().ToLowerInvariant()
+        if ($Context.ContainsKey($name)) {
+            [void]$sb.Append((Remove-InvalidNameChars ([string]$Context[$name])))
+        } else {
+            if (-not $unknown.Contains($m.Value)) { $unknown.Add($m.Value) }
+            [void]$sb.Append($m.Value)
+        }
+        $last = $m.Index + $m.Length
+    }
+    [void]$sb.Append($Template.Substring($last))
+    return [PSCustomObject]@{ Text = $sb.ToString(); Unknown = $unknown.ToArray() }
+}
+
+function Resolve-OutputLocation {
+    # Works out where the compressed file goes. No disk access.
+    param(
+        [Parameter(Mandatory = $true)][string]$InputPath,
+        [Parameter(Mandatory = $true)]$Settings,
+        $Plan = $null,
+        [datetime]$BatchTime = (Get-Date)
+    )
+    $context = Get-TemplateContext -InputPath $InputPath -Settings $Settings -Plan $Plan -BatchTime $BatchTime
+    $folderTemplate = [string]$Settings.outputFolder
+    $nameTemplate = [string]$Settings.fileName
+    if ([string]::IsNullOrWhiteSpace($nameTemplate)) { $nameTemplate = '{source}' }
+
+    $folderPart = Expand-TemplateText -Template $folderTemplate.Trim() -Context $context
+    $namePart   = Expand-TemplateText -Template $nameTemplate.Trim() -Context $context
+    $unknown = @(@($folderPart.Unknown) + @($namePart.Unknown) | Where-Object { $_ } | Select-Object -Unique)
+
+    # Folder: an absolute template is used as is; a relative one hangs off the original's own folder.
+    # Characters that are illegal anywhere in a path go first: on Windows PowerShell 5.1 even asking
+    # whether such a path is rooted throws.
+    $text = [regex]::Replace($folderPart.Text, '[<>"|*?\x00-\x1f]', '')
+    $root = ''
+    if ($text -ne '' -and [System.IO.Path]::IsPathRooted($text)) {
+        $root = [System.IO.Path]::GetPathRoot($text)
+        $text = $text.Substring($root.Length)
+    }
+    $segments = New-Object System.Collections.Generic.List[string]
+    foreach ($raw in ($text -split '[\\/]')) {
+        if ($raw -eq '..') { $segments.Add('..'); continue }
+        $seg = ConvertTo-SafeSegment $raw
+        if ($seg -ne '' -and $seg -ne '.') { $segments.Add($seg) }
+    }
+    if ($root -ne '') { $baseDir = $root } else { $baseDir = [System.IO.Path]::GetDirectoryName($InputPath) }
+    if (-not $baseDir) { $baseDir = (Get-Location).Path }
+    $folder = $baseDir
+    if ($segments.Count -gt 0) { $folder = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($baseDir, ($segments.ToArray() -join [System.IO.Path]::DirectorySeparatorChar))) }
+
+    # File name: one segment, any separators typed here become underscores.
+    $name = ConvertTo-SafeSegment ($namePart.Text -replace '[\\/]', '_')
+    if ($name -eq '') { $name = ConvertTo-SafeSegment $context['source'] }
+    if ($name -eq '') { $name = 'video' }
+    # Keep the whole path under the classic Windows limit (PowerShell 5.1 is not long-path aware).
+    $maxName = 245 - $folder.Length - 6
+    if ($maxName -lt 20) { $maxName = 20 }
+    if ($name.Length -gt $maxName) { $name = $name.Substring(0, $maxName).TrimEnd('.', ' ') }
+
+    return [PSCustomObject]@{
+        Folder   = $folder
+        BaseName = $name
+        FileName = $name + '.mp4'
+        Path     = [System.IO.Path]::Combine($folder, $name + '.mp4')
+        Unknown  = $unknown
+    }
+}
+
+function Get-UnknownVariableMessage {
+    param($Location)
+    $valid = ((Get-TemplateVariables | ForEach-Object { '{' + $_.Name + '}' }) -join ' ')
+    return ("Unknown variable in the output folder or file name: $(@($Location.Unknown) -join ', '). Valid variables: $valid")
+}
+
+function Assert-KnownTemplateVariables {
+    param($Location)
+    if (@($Location.Unknown | Where-Object { $_ }).Count -gt 0) { throw (Get-UnknownVariableMessage $Location) }
+}
+
+function Get-OutputPath {
+    # Resolves the templates, creates the folder, and returns a path that does not exist yet:
+    # an existing file (including the original) is never overwritten, " (2)", " (3)" ... is added instead.
+    param(
+        [Parameter(Mandatory = $true)][string]$InputPath,
+        [Parameter(Mandatory = $true)]$Settings,
+        $Plan = $null,
+        [datetime]$BatchTime = (Get-Date)
+    )
+    $loc = Resolve-OutputLocation -InputPath $InputPath -Settings $Settings -Plan $Plan -BatchTime $BatchTime
+    Assert-KnownTemplateVariables $loc
+    if (-not (Test-Path -LiteralPath $loc.Folder)) {
+        try {
+            # No -Force: it would let a path component that is an existing FILE be replaced by a folder.
+            New-Item -ItemType Directory -Path $loc.Folder -ErrorAction Stop | Out-Null
+        } catch {
+            throw ("Could not create the output folder '$($loc.Folder)' ($($_.Exception.Message)). " +
+                   'If the original is on read-only media, choose a full folder path such as C:\Videos\Encoded in Output folder.')
+        }
+    }
+    $candidate = $loc.Path
     $n = 2
     while (Test-Path -LiteralPath $candidate) {
-        $candidate = Join-Path $dir ($base + $suffix + " ($n).mp4")
+        $candidate = [System.IO.Path]::Combine($loc.Folder, $loc.BaseName + " ($n).mp4")
         $n++
     }
     return $candidate
@@ -80,26 +247,43 @@ function Get-DefaultSettings {
         mode                    = 'quality'
         audioKbps               = 96
         maxHeight               = 0
-        outputMode              = 'nextToSource'
-        outputFolder            = ''
-        outputSuffix            = '.compressed'
+        outputFolder            = 'Encoded'
+        fileName                = '{source}'
         skipIfAlreadyUnderLimit = $true
         maxRetries              = 2
     }
 }
 
-function Get-SettingsPath { return (Join-Path (Get-ToolRoot) 'settings.json') }
+$script:SettingsPathOverride = $null   # set by tests so they never touch the real settings.json
+function Get-SettingsPath {
+    if ($script:SettingsPathOverride) { return $script:SettingsPathOverride }
+    return (Join-Path (Get-ToolRoot) 'settings.json')
+}
 
 function Get-Settings {
+    param([string]$Path = '')    # tests pass a temporary file; normally settings.json next to the scripts
     $defaults = Get-DefaultSettings
     $obj = New-Object PSObject
     foreach ($k in $defaults.Keys) { $obj | Add-Member -MemberType NoteProperty -Name $k -Value $defaults[$k] }
-    $file = Get-SettingsPath
+    $file = $Path
+    if (-not $file) { $file = Get-SettingsPath }
     if (Test-Path -LiteralPath $file) {
         try {
             $json = Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json
+            # Files from versions before output templates have outputMode/outputSuffix. Carry the
+            # user's explicit folder over; the old default "next to the original" becomes the new Encoded default.
+            $legacy = ($null -ne $json.PSObject.Properties['outputMode']) -and ($null -eq $json.PSObject.Properties['fileName'])
             foreach ($prop in $json.PSObject.Properties) {
+                if ($legacy -and $prop.Name -eq 'outputFolder') { continue }
                 if ($defaults.Contains($prop.Name)) { $obj.($prop.Name) = $prop.Value }
+            }
+            if ($legacy) {
+                if ("$($json.outputMode)" -eq 'folder' -and -not [string]::IsNullOrWhiteSpace([string]$json.outputFolder)) {
+                    $obj.outputFolder = [string]$json.outputFolder
+                }
+                $oldSuffix = ''
+                if ($null -ne $json.PSObject.Properties['outputSuffix']) { $oldSuffix = [string]$json.outputSuffix }
+                if ($oldSuffix.Trim() -ne '' -and $oldSuffix -ne '.compressed') { $obj.fileName = '{source}' + $oldSuffix }
             }
         } catch {
             Write-Log "settings.json could not be read, using defaults: $($_.Exception.Message)"

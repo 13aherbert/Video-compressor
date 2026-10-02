@@ -15,6 +15,10 @@
 .PARAMETER TargetMB, Codec, Speed, Quality, Mode
     Override settings.json for this run (console mode). Quality is the HandBrake-style RF number
     (default 32, lower = better); Mode is 'quality' (default) or 'fill' (always use the full limit).
+.PARAMETER OutputFolder, NameTemplate
+    Override the output folder and file name templates for this run. Variables such as {source},
+    {date}, {codec}, {quality}, {width}, {height} are replaced; a relative folder is relative to each
+    original file. Example: -OutputFolder "Encoded\{date}" -NameTemplate "{source}_{height}p".
 .PARAMETER NoPause
     Do not wait for Enter at the end of console mode.
 #>
@@ -27,6 +31,8 @@ param(
     [string]$Speed = '',
     [double]$Quality = 0,
     [string]$Mode = '',
+    [string]$OutputFolder = '',
+    [string]$NameTemplate = '',
     [switch]$NoPause
 )
 
@@ -38,6 +44,7 @@ $coreDir = Join-Path $PSScriptRoot 'Core'
 . (Join-Path $coreDir 'Probe.ps1')
 . (Join-Path $coreDir 'Plan.ps1')
 . (Join-Path $coreDir 'Encode.ps1')
+. (Join-Path $coreDir 'Eta.ps1')
 
 function Test-GuiAvailable {
     if (-not (Test-IsWindows)) { return $false }
@@ -88,7 +95,11 @@ function Invoke-ConsoleMode {
         return 0
     }
 
+    $batchTime = Get-Date    # {date} and {time} in the output names are the same for the whole batch
     $failures = 0
+
+    # Step 1: read and plan every file first, so the length of the whole queue is known for the time estimate.
+    $jobs = New-Object System.Collections.ArrayList
     $index = 0
     foreach ($file in $Files) {
         $index++
@@ -99,36 +110,60 @@ function Invoke-ConsoleMode {
             Write-Host ('    source: {0}, {1}x{2}, {3}' -f (Format-Bytes $info.SizeBytes), $info.Width, $info.Height, (Format-Duration $info.DurationSec))
             Write-Host ('    plan:   ' + (Format-PlanSummary -Info $info -Plan $plan))
             foreach ($n in $plan.Notes) { Write-Host "            $n" -ForegroundColor DarkGray }
-            if ($plan.Skip) { continue }
-
-            $out = Get-OutputPath -InputPath $file -Settings $Settings
-            $activity = "Compressing $($info.FileName)"
-            $progress = {
-                param($pct, $pass, $speed)
-                $label = 'pass 1 of 2 (analysing)'
-                if ($pass -eq 0) { $label = 'encoding at your quality setting' }
-                if ($pass -eq 2) { $label = 'pass 2 of 2 (encoding)' }
-                Write-Progress -Activity $activity -Status "$label  $([math]::Round($pct))%  $speed" -PercentComplete ([int]$pct)
-            }.GetNewClosure()
-
-            $result = Invoke-CompressVideo -Info $info -Plan $plan -OutputPath $out -Settings $Settings -OnProgress $progress
-            Write-Progress -Activity $activity -Completed
-
-            switch ($result.Status) {
-                'Done'      {
-                    $how = "fitted by two-pass at $($result.VideoKbps) kbps"
-                    if ($result.Method -eq 'quality') { $how = "quality RF $($result.Crf)" }
-                    Write-Host ('    done:   {0} ({1}) in {2}s -> {3}' -f (Format-Bytes $result.SizeBytes), $how, $result.ElapsedSec, $result.OutputPath) -ForegroundColor Green
-                }
-                'OverLimit' { Write-Host ('    WARNING: still {0} after {1} attempts -> {2}' -f (Format-Bytes $result.SizeBytes), $result.Attempts, $result.OutputPath) -ForegroundColor Yellow }
-                default     { Write-Host "    $($result.Status)" -ForegroundColor Yellow }
+            if (-not $plan.Skip) {
+                $preview = Resolve-OutputLocation -InputPath $file -Settings $Settings -Plan $plan -BatchTime $batchTime
+                Assert-KnownTemplateVariables $preview
+                Write-Host ('    output: ' + $preview.Path)
+                [void]$jobs.Add(@{ File = $file; Info = $info; Plan = $plan })
             }
         } catch {
             $failures++
             Write-Host "    FAILED: $($_.Exception.Message)" -ForegroundColor Red
             Write-Log "FAILED '$file': $($_.Exception.Message)"
         }
+    }
+
+    if ($jobs.Count -gt 0) {
+        # Step 2: compress, with elapsed time and an estimate for this file and for the queue.
         Write-Host ''
+        Write-Host "Compressing $($jobs.Count) file(s)..." -ForegroundColor Cyan
+        $durations = New-Object System.Collections.Generic.List[double]
+        foreach ($job in $jobs) { $durations.Add([double]$job.Info.DurationSec) }
+        $tracker = New-EtaTracker -Durations $durations.ToArray() -Mode "$($Settings.mode)"
+        $position = 0
+        foreach ($job in $jobs) {
+            $position++
+            $info = $job.Info
+            Start-EtaFile -Tracker $tracker -Index ($position - 1)
+            Write-Host "[$position/$($jobs.Count)] $($info.FileName)" -ForegroundColor White
+            $learn = $false
+            try {
+                $out = Get-OutputPath -InputPath $job.File -Settings $Settings -Plan $job.Plan -BatchTime $batchTime
+                $activity = "Compressing $($info.FileName)"
+                $progress = New-ConsoleProgressCallback -Tracker $tracker -Activity $activity -Position $position -Total $jobs.Count
+                $result = Invoke-CompressVideo -Info $info -Plan $job.Plan -OutputPath $out -Settings $Settings -OnProgress $progress
+                Write-Progress -Activity $activity -Completed
+                $learn = ($result.Status -eq 'Done')
+
+                switch ($result.Status) {
+                    'Done'      {
+                        $how = "fitted by two-pass at $($result.VideoKbps) kbps"
+                        if ($result.Method -eq 'quality') { $how = "quality RF $($result.Crf)" }
+                        Write-Host ('    done:   {0} ({1}) in {2} -> {3}' -f (Format-Bytes $result.SizeBytes), $how, (Format-Clock $result.ElapsedSec), $result.OutputPath) -ForegroundColor Green
+                    }
+                    'OverLimit' { Write-Host ('    WARNING: still {0} after {1} attempts -> {2}' -f (Format-Bytes $result.SizeBytes), $result.Attempts, $result.OutputPath) -ForegroundColor Yellow }
+                    default     { Write-Host "    $($result.Status)" -ForegroundColor Yellow }
+                }
+            } catch {
+                $failures++
+                Write-Host "    FAILED: $($_.Exception.Message)" -ForegroundColor Red
+                Write-Log "FAILED '$($job.File)': $($_.Exception.Message)"
+            }
+            Complete-EtaFile -Tracker $tracker -Learn:$learn
+            Write-Host ''
+        }
+        $total = Get-EtaSnapshot -Tracker $tracker
+        Write-Host ("Finished {0} file(s) in {1}." -f $jobs.Count, (Format-Clock $total.QueueElapsed)) -ForegroundColor Cyan
     }
     Write-Host "Log: $(Get-LogPath)"
     return $failures
@@ -143,6 +178,8 @@ if ($Codec)          { $settings.codec = $Codec }
 if ($Speed)          { $settings.speed = $Speed }
 if ($Quality -gt 0)  { $settings.quality = $Quality }
 if ($Mode)           { $settings.mode = $Mode }
+if ($PSBoundParameters.ContainsKey('OutputFolder')) { $settings.outputFolder = $OutputFolder }   # an empty value is allowed: same folder as the original
+if ($NameTemplate)   { $settings.fileName = $NameTemplate }
 
 $inputs = Resolve-VideoInputs -Paths $Files
 $exitCode = 0
