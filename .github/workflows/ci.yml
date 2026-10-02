@@ -1,0 +1,58 @@
+name: Test and package
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test-windows:
+    # Runs the real thing: Windows PowerShell 5.1 (what a locked-down work PC has) with the
+    # downloaded static ffmpeg, including end-to-end encodes.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download ffmpeg into bin
+        shell: powershell
+        run: .\tools\Get-FFmpeg.ps1
+      - name: Run tests under Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $PSVersionTable.PSVersion
+          .\tests\Run-Tests.ps1
+      - name: Console mode smoke test (no window)
+        shell: powershell
+        run: .\src\Main.ps1 -NoGui -NoPause -TargetMB 3 -Speed fast "tests\fixtures\clip 1080p30 (20s).mp4"
+
+  test-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Run tests under PowerShell 7
+        shell: pwsh
+        run: ./tests/Run-Tests.ps1
+
+  package:
+    needs: [test-windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build zip with ffmpeg included
+        shell: powershell
+        run: .\tools\Build-Package.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Video-compressor-win64
+          path: dist/*.zip
+      - name: Attach to GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip

@@ -1,0 +1,12 @@
+# FFmpeg binaries are downloaded by tools/Get-FFmpeg.ps1, never committed
+bin/*
+!bin/.gitkeep
+
+# Runtime output
+logs/
+tests/fixtures/
+tests/out/
+
+# Packaging
+dist/
+*.zip

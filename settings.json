@@ -1,0 +1,14 @@
+{
+  "targetMB": 40,
+  "sizeUnitBytes": 1000000,
+  "safetyMarginPercent": 3,
+  "codec": "hevc",
+  "speed": "balanced",
+  "audioKbps": 96,
+  "maxHeight": 0,
+  "outputMode": "nextToSource",
+  "outputFolder": "",
+  "outputSuffix": ".compressed",
+  "skipIfAlreadyUnderLimit": true,
+  "maxRetries": 2
+}
