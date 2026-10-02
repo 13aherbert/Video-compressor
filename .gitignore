@@ -1,6 +1,7 @@
 # FFmpeg binaries are downloaded by tools/Get-FFmpeg.ps1, never committed
 bin/*
 !bin/.gitkeep
+!bin/NOTICE.txt
 
 # Runtime output
 logs/

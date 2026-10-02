@@ -4,6 +4,8 @@
   "safetyMarginPercent": 3,
   "codec": "hevc",
   "speed": "balanced",
+  "quality": 32,
+  "mode": "quality",
   "audioKbps": 96,
   "maxHeight": 0,
   "outputMode": "nextToSource",

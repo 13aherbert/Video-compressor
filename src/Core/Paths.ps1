@@ -76,6 +76,8 @@ function Get-DefaultSettings {
         safetyMarginPercent     = 3
         codec                   = 'hevc'
         speed                   = 'balanced'
+        quality                 = 32
+        mode                    = 'quality'
         audioKbps               = 96
         maxHeight               = 0
         outputMode              = 'nextToSource'
@@ -103,6 +105,12 @@ function Get-Settings {
             Write-Log "settings.json could not be read, using defaults: $($_.Exception.Message)"
         }
     }
+    # Sanity limits: nothing below 720p is ever produced; quality stays in a usable range.
+    if ([int]$obj.maxHeight -gt 0 -and [int]$obj.maxHeight -lt 720) { $obj.maxHeight = 720 }
+    $q = [double]$obj.quality
+    if ($q -lt 18) { $q = 18 } elseif ($q -gt 45) { $q = 45 }
+    $obj.quality = $q
+    if ("$($obj.mode)".ToLowerInvariant() -ne 'fill') { $obj.mode = 'quality' } else { $obj.mode = 'fill' }
     return $obj
 }
 

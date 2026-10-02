@@ -12,8 +12,9 @@
     Video files or folders to compress (the launcher passes dropped items here).
 .PARAMETER NoGui
     Force console mode.
-.PARAMETER TargetMB, Codec, Speed
-    Override settings.json for this run (console mode).
+.PARAMETER TargetMB, Codec, Speed, Quality, Mode
+    Override settings.json for this run (console mode). Quality is the HandBrake-style RF number
+    (default 32, lower = better); Mode is 'quality' (default) or 'fill' (always use the full limit).
 .PARAMETER NoPause
     Do not wait for Enter at the end of console mode.
 #>
@@ -24,6 +25,8 @@ param(
     [double]$TargetMB = 0,
     [string]$Codec = '',
     [string]$Speed = '',
+    [double]$Quality = 0,
+    [string]$Mode = '',
     [switch]$NoPause
 )
 
@@ -52,12 +55,30 @@ function Test-GuiAvailable {
     }
 }
 
+function Confirm-FFmpegInstalled {
+    # One-step setup: if ffmpeg is not in bin\ yet, download it now (needs internet, once).
+    try { Get-FFmpegPath | Out-Null; Get-FFprobePath | Out-Null; return $true } catch { }
+
+    $downloader = Join-Path (Join-Path (Get-ToolRoot) 'tools') 'Get-FFmpeg.ps1'
+    if (-not (Test-IsWindows) -or -not (Test-Path -LiteralPath $downloader)) { return $false }
+
+    Write-Host ''
+    Write-Host 'First run: ffmpeg is not in the "bin" folder yet, so it will be downloaded now (about 115 MB, once).' -ForegroundColor Cyan
+    Write-Host 'Keep this window open. It only needs internet this one time.'
+    Write-Log 'ffmpeg missing, running tools\Get-FFmpeg.ps1'
+    # Child process: the downloader ends with `exit`, which must not end this script.
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $downloader
+    try { Get-FFmpegPath | Out-Null; Get-FFprobePath | Out-Null; return $true } catch { return $false }
+}
+
 function Invoke-ConsoleMode {
     param([string[]]$Files, $Settings)
 
     $limit = Get-LimitBytes $Settings
     Write-Host ''
-    Write-Host "Video compressor  |  limit $(Format-Bytes $limit)  |  $(Get-CodecLabel $Settings.codec)  |  speed: $($Settings.speed)" -ForegroundColor Cyan
+    $how = "quality RF $($Settings.quality), fitted to the limit if needed"
+    if ($Settings.mode -eq 'fill') { $how = 'using the full limit (two-pass)' }
+    Write-Host "Video compressor  |  limit $(Format-Bytes $limit)  |  $(Get-CodecLabel $Settings.codec)  |  speed: $($Settings.speed)  |  $how" -ForegroundColor Cyan
     Write-Host ("ffmpeg: " + (Get-FFmpegPath))
     Write-Host ''
 
@@ -85,15 +106,20 @@ function Invoke-ConsoleMode {
             $progress = {
                 param($pct, $pass, $speed)
                 $label = 'pass 1 of 2 (analysing)'
+                if ($pass -eq 0) { $label = 'encoding at your quality setting' }
                 if ($pass -eq 2) { $label = 'pass 2 of 2 (encoding)' }
                 Write-Progress -Activity $activity -Status "$label  $([math]::Round($pct))%  $speed" -PercentComplete ([int]$pct)
             }.GetNewClosure()
 
-            $result = Invoke-TwoPassEncode -Info $info -Plan $plan -OutputPath $out -Settings $Settings -OnProgress $progress
+            $result = Invoke-CompressVideo -Info $info -Plan $plan -OutputPath $out -Settings $Settings -OnProgress $progress
             Write-Progress -Activity $activity -Completed
 
             switch ($result.Status) {
-                'Done'      { Write-Host ('    done:   {0} ({1}) in {2}s -> {3}' -f (Format-Bytes $result.SizeBytes), "$($result.VideoKbps) kbps", $result.ElapsedSec, $result.OutputPath) -ForegroundColor Green }
+                'Done'      {
+                    $how = "fitted by two-pass at $($result.VideoKbps) kbps"
+                    if ($result.Method -eq 'quality') { $how = "quality RF $($result.Crf)" }
+                    Write-Host ('    done:   {0} ({1}) in {2}s -> {3}' -f (Format-Bytes $result.SizeBytes), $how, $result.ElapsedSec, $result.OutputPath) -ForegroundColor Green
+                }
                 'OverLimit' { Write-Host ('    WARNING: still {0} after {1} attempts -> {2}' -f (Format-Bytes $result.SizeBytes), $result.Attempts, $result.OutputPath) -ForegroundColor Yellow }
                 default     { Write-Host "    $($result.Status)" -ForegroundColor Yellow }
             }
@@ -115,12 +141,21 @@ $settings = Get-Settings
 if ($TargetMB -gt 0) { $settings.targetMB = $TargetMB }
 if ($Codec)          { $settings.codec = $Codec }
 if ($Speed)          { $settings.speed = $Speed }
+if ($Quality -gt 0)  { $settings.quality = $Quality }
+if ($Mode)           { $settings.mode = $Mode }
 
 $inputs = Resolve-VideoInputs -Paths $Files
 $exitCode = 0
 
 try {
-    if (-not $NoGui -and (Test-GuiAvailable)) {
+    if (-not (Confirm-FFmpegInstalled)) {
+        Write-Host ''
+        Write-Host 'ffmpeg is missing and could not be downloaded.' -ForegroundColor Red
+        Write-Host 'On a computer with internet access, run this program once so it can download ffmpeg,'
+        Write-Host 'then copy the whole folder (including "bin") to this computer or your flash drive.'
+        Write-Host 'Or download Video-compressor-win64.zip from the GitHub Releases page, which already includes it.'
+        $exitCode = 1
+    } elseif (-not $NoGui -and (Test-GuiAvailable)) {
         . (Join-Path $PSScriptRoot 'Gui.ps1')
         Show-CompressorWindow -Files $inputs -Settings $settings
     } else {

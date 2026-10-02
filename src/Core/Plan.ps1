@@ -4,11 +4,18 @@
 # as good as possible. No ffmpeg calls here, so it is fast and unit-testable.
 
 # Shorter side of the frame (height for landscape, width for portrait), highest first.
-$script:Ladder = @(2160, 1440, 1080, 720, 540, 480, 360)
+# 720 is the floor: the tool never creates anything smaller. When the budget gets tight the
+# bitrate falls instead, and the quality grade says how rough that will look.
+$script:Ladder = @(2160, 1440, 1080, 720)
+$script:MinShortSide = 720
 
-# Bits per pixel per frame below which the picture starts to look bad.
+# Bits per pixel per frame below which the tool steps down to the next resolution rung.
+# Deliberately low, so bitrate drops first and resolution only when it must.
 # HEVC needs fewer bits than H.264 for the same quality.
-$script:BppThreshold = @{ hevc = 0.035; h264 = 0.065 }
+$script:BppThreshold = @{ hevc = 0.02; h264 = 0.04 }
+
+# Quality grade shown in the preview: Good at or above this, OK above 60 % of it, else Poor.
+$script:GradeBpp = @{ hevc = 0.015; h264 = 0.03 }
 
 $script:PresetMap = @{
     fast     = 'fast'
@@ -150,6 +157,7 @@ function New-EncodePlan {
 
     $outShort = $srcShort
     $maxHeight = [int]$Settings.maxHeight
+    if ($maxHeight -gt 0 -and $maxHeight -lt $script:MinShortSide) { $maxHeight = $script:MinShortSide }
     if ($maxHeight -gt 0 -and $outShort -gt $maxHeight) {
         $outShort = $maxHeight
         $notes.Add("Limited to ${maxHeight}p by your settings.")
@@ -180,8 +188,9 @@ function New-EncodePlan {
     $plan.Bpp = [math]::Round((& $bppAt $outShort $outFps), 4)
     $plan.VideoKbps = [int][math]::Floor($videoBps / 1000.0)
 
-    if ($plan.Bpp -ge $threshold)             { $plan.Grade = 'Good' }
-    elseif ($plan.Bpp -ge ($threshold * 0.6)) { $plan.Grade = 'OK' }
+    $goodBpp = [double]$script:GradeBpp[$codec]
+    if ($plan.Bpp -ge $goodBpp)             { $plan.Grade = 'Good' }
+    elseif ($plan.Bpp -ge ($goodBpp * 0.6)) { $plan.Grade = 'OK' }
     else                                      { $plan.Grade = 'Poor' }
     if ($plan.Grade -eq 'Poor') {
         $notes.Add('Very little data per frame: expect visible blockiness. Trim the video or raise the limit.')

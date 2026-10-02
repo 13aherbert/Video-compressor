@@ -1,0 +1,17 @@
+ffmpeg and ffprobe (bin\ffmpeg.exe, bin\ffprobe.exe)
+=====================================================
+
+These two programs are FFmpeg (https://ffmpeg.org), built with the x264 and x265 encoders and
+distributed under the GNU General Public License (GPL). They are third-party software, not part
+of this project's MIT licence, and are unmodified static Windows builds.
+
+Builds come from one of:
+  gyan.dev   https://www.gyan.dev/ffmpeg/builds/
+  BtbN       https://github.com/BtbN/FFmpeg-Builds
+
+The licence text for the build you have is in FFMPEG-LICENSE.txt next to this file (when present).
+Source code for FFmpeg is available from https://ffmpeg.org/download.html#get-sources and, for the
+exact builds, from the links above. x264 source: https://code.videolan.org/videolan/x264
+x265 source: https://bitbucket.org/multicoreware/x265_git
+
+If you pass the files on to anyone, keep this notice with them.

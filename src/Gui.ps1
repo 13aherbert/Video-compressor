@@ -33,7 +33,7 @@ function Show-CompressorWindow {
     # ------------------------------------------------------------------ options (top)
     $top = New-Object System.Windows.Forms.Panel
     $top.Dock = 'Top'
-    $top.Height = 86
+    $top.Height = 122
     $top.Padding = New-Object System.Windows.Forms.Padding(10, 8, 10, 0)
     $form.Controls.Add($top)
 
@@ -75,9 +75,9 @@ function Show-CompressorWindow {
     $cboSpeed = Add-Combo $top @('Fast', 'Balanced', 'Best quality (slow)') 525 $y1 150 $speedIndex
 
     Add-Label $top 'Max resolution' 690 ($y1 + 4) | Out-Null
-    $resOptions = @(0, 1080, 720, 480)
+    $resOptions = @(0, 1080, 720)
     $resIndex = [array]::IndexOf($resOptions, [int]$Settings.maxHeight); if ($resIndex -lt 0) { $resIndex = 0 }
-    $cboMaxRes = Add-Combo $top @('Auto', '1080p', '720p', '480p') 785 $y1 90 $resIndex
+    $cboMaxRes = Add-Combo $top @('Auto', '1080p', '720p') 785 $y1 90 $resIndex
 
     Add-Label $top 'Save to' 10 ($y2 + 4) | Out-Null
     $outIndex = 0; if ($Settings.outputMode -eq 'folder') { $outIndex = 1 }
@@ -96,6 +96,22 @@ function Show-CompressorWindow {
     $chkSmall.Checked = -not [bool]$Settings.skipIfAlreadyUnderLimit
     $chkSmall.Location = New-Object System.Drawing.Point(690, ($y2 + 2))
     $top.Controls.Add($chkSmall)
+
+    $y3 = 86
+    Add-Label $top 'Quality (RF)' 10 ($y3 + 4) | Out-Null
+    $numQuality = New-Object System.Windows.Forms.NumericUpDown
+    $numQuality.Minimum = 18; $numQuality.Maximum = 45; $numQuality.DecimalPlaces = 0
+    $numQuality.Value = [decimal][math]::Min(45, [math]::Max(18, [math]::Round([double]$Settings.quality)))
+    $numQuality.Location = New-Object System.Drawing.Point(100, $y3); $numQuality.Width = 70
+    $top.Controls.Add($numQuality)
+    $lblQuality = Add-Label $top 'Lower = better looking but bigger (30 to 35 is typical). The size limit always wins.' 180 ($y3 + 4)
+    $lblQuality.ForeColor = [System.Drawing.SystemColors]::GrayText
+    $chkFill = New-Object System.Windows.Forms.CheckBox
+    $chkFill.Text = 'Use the full size limit (two-pass)'
+    $chkFill.AutoSize = $true
+    $chkFill.Checked = ("$($Settings.mode)".ToLowerInvariant() -eq 'fill')
+    $chkFill.Location = New-Object System.Drawing.Point(690, ($y3 + 2))
+    $top.Controls.Add($chkFill)
 
     # ------------------------------------------------------------------ bottom: buttons + progress
     $bottom = New-Object System.Windows.Forms.Panel
@@ -145,7 +161,7 @@ function Show-CompressorWindow {
     $list.HideSelection = $false
     $list.AllowDrop = $true
     $list.ShowItemToolTips = $true
-    foreach ($col in @(@('File', 250), @('Length', 60), @('Source', 120), @('Output', 120), @('Video', 70), @('Audio', 90), @('Est. size', 70), @('Quality', 60), @('Status', 150))) {
+    foreach ($col in @(@('File', 210), @('Length', 55), @('Source', 130), @('Output', 120), @('Video', 80), @('Audio', 90), @('Est. size', 90), @('Quality', 55), @('Status', 170))) {
         $list.Columns.Add($col[0], $col[1]) | Out-Null
     }
     $form.Controls.Add($list)
@@ -161,6 +177,8 @@ function Show-CompressorWindow {
         $s.outputMode = @('nextToSource', 'folder')[$cboOut.SelectedIndex]
         $s.outputFolder = $txtOut.Text
         $s.skipIfAlreadyUnderLimit = -not $chkSmall.Checked
+        $s.quality = [double]$numQuality.Value
+        $s.mode = 'quality'; if ($chkFill.Checked) { $s.mode = 'fill' }
     }
 
     function Update-Row {
@@ -180,14 +198,23 @@ function Show-CompressorWindow {
         } else {
             $outFps = $srcFps; if ($plan.OutFps -gt 0) { $outFps = [math]::Round($plan.OutFps, 0) }
             $row.SubItems[3].Text = "$($plan.OutWidth)x$($plan.OutHeight) $outFps fps"
-            $row.SubItems[4].Text = "$($plan.VideoKbps) kbps"
+            if ($state.Settings.mode -eq 'fill') {
+                $row.SubItems[4].Text = "$($plan.VideoKbps) kbps"
+                $row.SubItems[6].Text = Format-Bytes $plan.EstimatedBytes
+            } else {
+                $row.SubItems[4].Text = "RF $([math]::Round([double]$state.Settings.quality))"
+                $row.SubItems[6].Text = 'up to ' + (Format-Bytes $plan.EstimatedBytes)
+            }
             $audio = 'none'
             if ($plan.AudioKbps -gt 0) { $ch = 'stereo'; if ($plan.AudioChannels -eq 1) { $ch = 'mono' }; $audio = "$($plan.AudioKbps) kbps $ch" }
             $row.SubItems[5].Text = $audio
-            $row.SubItems[6].Text = Format-Bytes $plan.EstimatedBytes
             $row.SubItems[7].Text = $plan.Grade
             $row.SubItems[8].Text = $item.Status
-            $row.ToolTipText = ($plan.Notes -join "`n")
+            $tip = @($plan.Notes)
+            if ($state.Settings.mode -ne 'fill') {
+                $tip += "Encodes at quality RF $([math]::Round([double]$state.Settings.quality)) first and keeps that if it fits. If it is too big, it re-encodes at $($plan.VideoKbps) kbps; the quality grade describes that fallback."
+            }
+            $row.ToolTipText = ($tip -join "`n")
         }
         $grade = ''
         if ($null -ne $plan -and -not $plan.Skip) { $grade = $plan.Grade }
@@ -242,7 +269,7 @@ function Show-CompressorWindow {
     function Set-Busy {
         param([bool]$Busy)
         $state.Running = $Busy
-        foreach ($c in @($numTarget, $cboCodec, $cboSpeed, $cboMaxRes, $cboOut, $btnBrowse, $chkSmall, $btnAdd, $btnRemove, $btnClear, $btnStart)) { $c.Enabled = -not $Busy }
+        foreach ($c in @($numTarget, $cboCodec, $cboSpeed, $cboMaxRes, $cboOut, $btnBrowse, $chkSmall, $numQuality, $chkFill, $btnAdd, $btnRemove, $btnClear, $btnStart)) { $c.Enabled = -not $Busy }
         $btnCancel.Enabled = $Busy
         $form.AllowDrop = -not $Busy
         $list.AllowDrop = -not $Busy
@@ -279,21 +306,26 @@ function Show-CompressorWindow {
             $current = $item
             $onProgress = {
                 param($pct, $pass, $speed)
-                $label = 'analysing'; if ($pass -eq 2) { $label = 'encoding' }
+                $label = 'analysing'; if ($pass -eq 2 -or $pass -eq 0) { $label = 'encoding' }
                 $current.Status = ('{0} {1}% ({2})' -f $label, [int]$pct, $speed)
                 $current.Row.SubItems[8].Text = $current.Status
                 $barFile.Value = [int][math]::Max(0, [math]::Min(100, $pct))
-                $fileFraction = (($pass - 1) + ($pct / 100.0)) / 2.0
+                if ($pass -eq 0) { $fileFraction = $pct / 100.0 } else { $fileFraction = (($pass - 1) + ($pct / 100.0)) / 2.0 }
                 $barAll.Value = [int][math]::Min(100, (($n + $fileFraction) / $todo.Count) * 100)
-                $lblStatus.Text = ('File {0} of {1}: {2}  (pass {3} of 2, {4})' -f ($n + 1), $todo.Count, $current.Info.FileName, $pass, $speed)
+                if ($pass -eq 0) { $where = "quality RF $([math]::Round([double]$s.quality))" } else { $where = "pass $pass of 2" }
+                $lblStatus.Text = ('File {0} of {1}: {2}  ({3}, {4})' -f ($n + 1), $todo.Count, $current.Info.FileName, $where, $speed)
                 [System.Windows.Forms.Application]::DoEvents()
             }.GetNewClosure()
             $shouldCancel = { [System.Windows.Forms.Application]::DoEvents(); return $state.Cancel }.GetNewClosure()
             try {
-                $result = Invoke-TwoPassEncode -Info $item.Info -Plan $item.Plan -OutputPath $outPath -Settings $s -OnProgress $onProgress -ShouldCancel $shouldCancel
+                $result = Invoke-CompressVideo -Info $item.Info -Plan $item.Plan -OutputPath $outPath -Settings $s -OnProgress $onProgress -ShouldCancel $shouldCancel
                 $item.Result = $result
                 switch ($result.Status) {
-                    'Done'      { $done++; $item.Status = "Done: $(Format-Bytes $result.SizeBytes)" }
+                    'Done'      {
+                        $done++
+                        if ($result.Method -eq 'quality') { $item.Status = "Done: $(Format-Bytes $result.SizeBytes) (RF $($result.Crf))" }
+                        else { $item.Status = "Done: $(Format-Bytes $result.SizeBytes) (fitted to limit)" }
+                    }
                     'OverLimit' { $over++; $item.Status = "Still $(Format-Bytes $result.SizeBytes) (over)" }
                     'Cancelled' { $item.Status = 'Cancelled' }
                     default     { $failed++; $item.Status = $result.Status }
@@ -381,6 +413,8 @@ function Show-CompressorWindow {
     foreach ($c in @($cboCodec, $cboSpeed, $cboMaxRes, $cboOut)) { $c.Add_SelectedIndexChanged({ Update-Plans }) }
     $numTarget.Add_ValueChanged({ Update-Plans })
     $chkSmall.Add_CheckedChanged({ Update-Plans })
+    $chkFill.Add_CheckedChanged({ Update-Plans })
+    $numQuality.Add_ValueChanged({ Update-Plans })
     $form.Add_FormClosing({
         if ($state.Running) {
             # Let the batch loop unwind cleanly, then close from Start-Batch.

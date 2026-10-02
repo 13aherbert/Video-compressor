@@ -24,7 +24,7 @@ if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurs
 $target = Join-Path $staging 'Video-compressor'
 New-Item -ItemType Directory -Path $target -Force | Out-Null
 
-foreach ($entry in @('Compress-Videos.bat', 'settings.json', 'README.md', 'src', 'tools', 'bin')) {
+foreach ($entry in @('Compress-Videos.bat', 'settings.json', 'README.md', 'LICENSE', 'src', 'tools', 'bin')) {
     $src = Join-Path $root $entry
     if (Test-Path -LiteralPath $src) { Copy-Item -LiteralPath $src -Destination (Join-Path $target $entry) -Recurse -Force }
 }

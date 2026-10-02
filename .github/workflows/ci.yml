@@ -48,6 +48,16 @@ jobs:
       - name: Build zip with ffmpeg included
         shell: powershell
         run: .\tools\Build-Package.ps1
+      - name: Check the zip works as shipped
+        shell: powershell
+        run: |
+          Expand-Archive -Path dist\Video-compressor-win64.zip -DestinationPath $env:RUNNER_TEMP\unzipped
+          $app = Join-Path $env:RUNNER_TEMP 'unzipped\Video-compressor'
+          foreach ($f in 'Compress-Videos.bat', 'src\Main.ps1', 'bin\ffmpeg.exe', 'bin\ffprobe.exe', 'bin\NOTICE.txt', 'settings.json') {
+            if (-not (Test-Path (Join-Path $app $f))) { throw "Missing from zip: $f" }
+          }
+          & (Join-Path $app 'bin\ffmpeg.exe') -version | Select-Object -First 1
+          & (Join-Path $app 'bin\ffprobe.exe') -version | Select-Object -First 1
       - uses: actions/upload-artifact@v4
         with:
           name: Video-compressor-win64
