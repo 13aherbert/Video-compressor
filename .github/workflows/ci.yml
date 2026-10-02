@@ -41,7 +41,7 @@ jobs:
 
   package:
     needs: [test-windows]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -51,18 +51,41 @@ jobs:
       - name: Check the zip works as shipped
         shell: powershell
         run: |
-          Expand-Archive -Path dist\Video-compressor-win64.zip -DestinationPath $env:RUNNER_TEMP\unzipped
-          $app = Join-Path $env:RUNNER_TEMP 'unzipped\Video-compressor'
+          $ErrorActionPreference = 'Stop'
+          $dest = Join-Path $env:RUNNER_TEMP 'unzipped'
+          Expand-Archive -Path dist\Video-compressor-win64.zip -DestinationPath $dest
+          $app = Join-Path $dest 'Video-compressor'
+
           foreach ($f in 'Compress-Videos.bat', 'src\Main.ps1', 'bin\ffmpeg.exe', 'bin\ffprobe.exe', 'bin\NOTICE.txt', 'settings.json') {
             if (-not (Test-Path (Join-Path $app $f))) { throw "Missing from zip: $f" }
           }
-          & (Join-Path $app 'bin\ffmpeg.exe') -version | Select-Object -First 1
-          & (Join-Path $app 'bin\ffprobe.exe') -version | Select-Object -First 1
+
+          # Run each tool without a truncating pipe: "| Select-Object -First 1" on a native program
+          # leaves a non-zero exit code in Windows PowerShell 5.1 and fails the whole step.
+          foreach ($tool in 'ffmpeg', 'ffprobe') {
+            $out = & (Join-Path $app "bin\$tool.exe") -version 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "$tool.exe from the zip failed to run (exit code $LASTEXITCODE)" }
+            @($out)[0]
+          }
+
+          # End to end: make a short clip with the shipped ffmpeg, then compress it with the shipped app.
+          $clip = Join-Path $env:RUNNER_TEMP 'smokeclip.mp4'
+          & (Join-Path $app 'bin\ffmpeg.exe') -hide_banner -loglevel error -y -f lavfi -i 'testsrc2=size=1280x720:rate=30' -f lavfi -i 'sine=frequency=440:sample_rate=48000' -t 3 -c:v libx264 -preset ultrafast -crf 10 -pix_fmt yuv420p -c:a aac $clip
+          if ($LASTEXITCODE -ne 0) { throw "Could not create the test clip (exit code $LASTEXITCODE)" }
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $app 'src\Main.ps1') -NoGui -NoPause -TargetMB 0.5 -Speed fast $clip
+          if ($LASTEXITCODE -ne 0) { throw "The shipped app failed (exit code $LASTEXITCODE)" }
+          $result = Join-Path $env:RUNNER_TEMP 'smokeclip.compressed.mp4'
+          if (-not (Test-Path $result)) { throw 'The shipped app produced no output file' }
+          $size = (Get-Item $result).Length
+          Write-Host "Compressed test clip: $size bytes (limit 500000)"
+          if ($size -le 0 -or $size -gt 500000) { throw "Output size $size is outside the 500000 byte limit" }
+          exit 0
       - uses: actions/upload-artifact@v4
         with:
           name: Video-compressor-win64
           path: dist/*.zip
       - name: Attach to GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*.zip
