@@ -44,7 +44,8 @@ jobs:
   package:
     timeout-minutes: 25
     needs: [test-windows]
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    # Runs on every push so the zip is built and checked before you ever publish a release.
+    # Only tags and manual runs upload it; only tags attach it to a release.
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -77,13 +78,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Could not create the test clip (exit code $LASTEXITCODE)" }
           & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $app 'src\Main.ps1') -NoGui -NoPause -TargetMB 0.5 -Speed fast $clip
           if ($LASTEXITCODE -ne 0) { throw "The shipped app failed (exit code $LASTEXITCODE)" }
-          $result = Join-Path $env:RUNNER_TEMP 'smokeclip.compressed.mp4'
+          # Default output: an Encoded folder next to the original, with the same name.
+          $result = Join-Path (Join-Path $env:RUNNER_TEMP 'Encoded') 'smokeclip.mp4'
           if (-not (Test-Path $result)) { throw 'The shipped app produced no output file' }
           $size = (Get-Item $result).Length
           Write-Host "Compressed test clip: $size bytes (limit 500000)"
           if ($size -le 0 -or $size -gt 500000) { throw "Output size $size is outside the 500000 byte limit" }
           exit 0
       - uses: actions/upload-artifact@v4
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         with:
           name: Video-compressor-win64
           path: dist/*.zip
