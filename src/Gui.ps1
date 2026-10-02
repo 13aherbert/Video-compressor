@@ -7,6 +7,43 @@
 # arrive every half second and each one pumps the message loop with DoEvents, which keeps
 # the window responsive and lets Cancel work.
 
+function New-GuiProgressCallback {
+    # Builds the progress callback handed to the encoder. Everything it touches is passed in as a
+    # parameter, because a closure only captures the variables of the function that creates it. It
+    # must not reach for the window's own variables: that is what made the first release fail with
+    # "The property 'Value' cannot be found on this object". $Ui is a hashtable with BarFile, BarAll,
+    # Status (controls), Pump (scriptblock that lets the window repaint) and LastError.
+    param($Ui, $Item, [int]$Index, [int]$Total, [double]$Quality)
+    $callback = {
+        param($pct, $pass, $speed)
+        try {
+            $label = 'analysing'
+            if ($pass -eq 2 -or $pass -eq 0) { $label = 'encoding' }
+            $Item.Status = ('{0} {1}% ({2})' -f $label, [int]$pct, $speed)
+            $Item.Row.SubItems[8].Text = $Item.Status
+            $Ui.BarFile.Value = [int][math]::Max(0, [math]::Min(100, $pct))
+            if ($pass -eq 0) { $fraction = $pct / 100.0 } else { $fraction = (($pass - 1) + ($pct / 100.0)) / 2.0 }
+            $Ui.BarAll.Value = [int][math]::Max(0, [math]::Min(100, (($Index + $fraction) / $Total) * 100))
+            if ($pass -eq 0) { $where = 'quality RF ' + [math]::Round($Quality) } else { $where = "pass $pass of 2" }
+            $Ui.Status.Text = ('File {0} of {1}: {2}  ({3}, {4})' -f ($Index + 1), $Total, $Item.Info.FileName, $where, $speed)
+            & $Ui.Pump
+        } catch {
+            # A cosmetic update must never abort an encode. The batch loop logs this afterwards.
+            $Ui.LastError = $_.Exception.Message
+        }
+    }.GetNewClosure()
+    return $callback
+}
+
+function New-GuiCancelCheck {
+    param($Ui, $State)
+    $check = {
+        try { & $Ui.Pump } catch { }
+        return [bool]$State.Cancel
+    }.GetNewClosure()
+    return $check
+}
+
 function Show-CompressorWindow {
     param([string[]]$Files, $Settings)
 
@@ -151,6 +188,15 @@ function Show-CompressorWindow {
     $barAll.Location = New-Object System.Drawing.Point(500, 64); $barAll.Width = 476; $barAll.Height = 18
     $barAll.Anchor = 'Top,Right'
     $bottom.Controls.Add($barAll)
+
+    # Controls and helpers that the encoder callbacks need, handed over explicitly (see New-GuiProgressCallback).
+    $ui = @{
+        BarFile   = $barFile
+        BarAll    = $barAll
+        Status    = $lblStatus
+        Pump      = { [System.Windows.Forms.Application]::DoEvents() }
+        LastError = ''
+    }
 
     # ------------------------------------------------------------------ list (fill)
     $list = New-Object System.Windows.Forms.ListView
@@ -303,20 +349,8 @@ function Show-CompressorWindow {
             $barFile.Value = 0
             $outPath = Get-OutputPath -InputPath $item.Path -Settings $s
             $state.OutputDir = Split-Path -Parent $outPath
-            $current = $item
-            $onProgress = {
-                param($pct, $pass, $speed)
-                $label = 'analysing'; if ($pass -eq 2 -or $pass -eq 0) { $label = 'encoding' }
-                $current.Status = ('{0} {1}% ({2})' -f $label, [int]$pct, $speed)
-                $current.Row.SubItems[8].Text = $current.Status
-                $barFile.Value = [int][math]::Max(0, [math]::Min(100, $pct))
-                if ($pass -eq 0) { $fileFraction = $pct / 100.0 } else { $fileFraction = (($pass - 1) + ($pct / 100.0)) / 2.0 }
-                $barAll.Value = [int][math]::Min(100, (($n + $fileFraction) / $todo.Count) * 100)
-                if ($pass -eq 0) { $where = "quality RF $([math]::Round([double]$s.quality))" } else { $where = "pass $pass of 2" }
-                $lblStatus.Text = ('File {0} of {1}: {2}  ({3}, {4})' -f ($n + 1), $todo.Count, $current.Info.FileName, $where, $speed)
-                [System.Windows.Forms.Application]::DoEvents()
-            }.GetNewClosure()
-            $shouldCancel = { [System.Windows.Forms.Application]::DoEvents(); return $state.Cancel }.GetNewClosure()
+            $onProgress = New-GuiProgressCallback -Ui $ui -Item $item -Index $n -Total $todo.Count -Quality ([double]$s.quality)
+            $shouldCancel = New-GuiCancelCheck -Ui $ui -State $state
             try {
                 $result = Invoke-CompressVideo -Info $item.Info -Plan $item.Plan -OutputPath $outPath -Settings $s -OnProgress $onProgress -ShouldCancel $shouldCancel
                 $item.Result = $result
@@ -337,6 +371,10 @@ function Show-CompressorWindow {
                 Write-Log "FAILED '$($item.Path)': $($_.Exception.Message)"
             }
             Update-Row $item
+            if ($ui.LastError) {
+                Write-Log "Window update problem (encoding was not affected): $($ui.LastError)"
+                $ui.LastError = ''
+            }
         }
 
         Set-Busy $false

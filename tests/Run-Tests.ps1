@@ -13,6 +13,7 @@ $srcCore = Join-Path (Join-Path (Split-Path -Parent $PSScriptRoot) 'src') 'Core'
 . (Join-Path $srcCore 'Probe.ps1')
 . (Join-Path $srcCore 'Plan.ps1')
 . (Join-Path $srcCore 'Encode.ps1')
+. (Join-Path (Split-Path -Parent $srcCore) 'Gui.ps1')   # only defines functions; no window is created
 
 $script:Pass = 0
 $script:Fail = 0
@@ -127,6 +128,44 @@ Assert-True ((Get-CrfValue -Plan $h264Plan -Settings (New-TestSettings @{ codec 
 $q = New-FFmpegArguments -Info (New-FakeInfo) -Plan $hevcPlan -Crf 32 -FileSizeLimit 40000000 -OutputPath 'out.mp4'
 Assert-True (($q -contains '-crf') -and ($q -contains '32') -and ($q -contains '-fs') -and ($q -contains '40000000')) 'quality arguments: -crf and -fs'
 Assert-True ((-not ($q -contains '-b:v')) -and (-not ($q -contains '-pass')) -and ($q[-1] -eq 'out.mp4') -and ($q -contains 'hvc1')) 'quality arguments: single pass, no target bitrate'
+
+Write-Host 'window callbacks (tested without a window)'
+$pumped = @{ N = 0 }
+$fakeUi = @{
+    BarFile   = [PSCustomObject]@{ Value = 0 }
+    BarAll    = [PSCustomObject]@{ Value = 0 }
+    Status    = [PSCustomObject]@{ Text = '' }
+    Pump      = { $pumped.N++ }.GetNewClosure()
+    LastError = ''
+}
+$fakeItem = @{
+    Status = ''
+    Row    = [PSCustomObject]@{ SubItems = @(1..9 | ForEach-Object { [PSCustomObject]@{ Text = '' } }) }
+    Info   = [PSCustomObject]@{ FileName = 'a.mp4' }
+}
+# Same shape as the real thing: the callback is built in one function and called from another that
+# the encoder runs, so any reliance on the builder's caller's variables would fail here.
+function Invoke-FakeEncoder { param([scriptblock]$OnProgress) & $OnProgress 25 1 '2.0x'; & $OnProgress 50 2 '1.5x'; & $OnProgress 100 0 '3.0x' }
+function Start-FakeBatch { $cb = New-GuiProgressCallback -Ui $fakeUi -Item $fakeItem -Index 1 -Total 4 -Quality 32; Invoke-FakeEncoder $cb }
+Start-FakeBatch
+Assert-True ($fakeUi.LastError -eq '') "progress callback ran without errors ($($fakeUi.LastError))"
+Assert-True ($fakeUi.BarFile.Value -eq 100) 'file progress bar updated'
+Assert-True ($fakeUi.BarAll.Value -eq 50) "overall progress bar updated (got $($fakeUi.BarAll.Value))"
+Assert-True ($fakeUi.Status.Text -eq 'File 2 of 4: a.mp4  (quality RF 32, 3.0x)') "status text: '$($fakeUi.Status.Text)'"
+Assert-True ($fakeItem.Row.SubItems[8].Text -eq 'encoding 100% (3.0x)') 'row status text updated'
+Assert-True ($pumped.N -eq 3) 'window repainted on every update'
+
+$brokenUi = @{ BarFile = $null; BarAll = $null; Status = $null; Pump = { }; LastError = '' }
+$errorEscaped = $false
+try { $cb = New-GuiProgressCallback -Ui $brokenUi -Item $fakeItem -Index 0 -Total 1 -Quality 32; & $cb 10 2 '1x' } catch { $errorEscaped = $true }
+Assert-True (-not $errorEscaped) 'a window problem never aborts an encode'
+Assert-True ($brokenUi.LastError -ne '') 'the window problem is recorded for the log'
+
+$cancelState = @{ Cancel = $false }
+$check = New-GuiCancelCheck -Ui $fakeUi -State $cancelState
+Assert-True ((& $check) -eq $false) 'cancel check is false at first'
+$cancelState.Cancel = $true
+Assert-True ((& $check) -eq $true) 'cancel check turns true after Cancel is clicked'
 
 Write-Host 'helpers'
 Assert-True ((ConvertTo-Fps '30000/1001') -eq 29.97) 'fps 30000/1001'
