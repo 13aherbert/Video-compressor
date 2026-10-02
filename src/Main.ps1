@@ -140,7 +140,8 @@ function Invoke-ConsoleMode {
             try {
                 $out = Get-OutputPath -InputPath $job.File -Settings $Settings -Plan $job.Plan -BatchTime $batchTime
                 $activity = "Compressing $($info.FileName)"
-                $progress = New-ConsoleProgressCallback -Tracker $tracker -Activity $activity -Position $position -Total $jobs.Count
+                Set-ConsoleProgressContext -Tracker $tracker -Activity $activity -Position $position -Total $jobs.Count
+                $progress = { param($pct, $pass, $speed) Update-ConsoleProgress $pct $pass $speed }
                 $result = Invoke-CompressVideo -Info $info -Plan $job.Plan -OutputPath $out -Settings $Settings -OnProgress $progress
                 Write-Progress -Activity $activity -Completed
                 $learn = ($result.Status -eq 'Done')

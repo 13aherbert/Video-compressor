@@ -7,9 +7,9 @@
 #   can change it.
 # - Encoding runs on the UI thread; ffmpeg's progress lines arrive every half second and each one
 #   pumps the message loop with DoEvents, which keeps the window responsive and lets Cancel work.
-# - A closure only captures variables of the function that creates it. The encoder callbacks are
-#   therefore built by helper functions that receive everything they touch as parameters, and the
-#   text they show is produced by plain functions that tests can call without a window.
+# - The encoder callbacks are plain script blocks that call top-level functions (no closures, see
+#   the notes above Update-GuiProgress), and the text they show is produced by plain functions
+#   that tests can call without a window.
 # - Show-CompressorWindow takes an optional -Automation script block. When given, the window is
 #   built but not shown, and the script is handed an object to drive it. The tests use this on
 #   Windows to click through a real batch.
@@ -30,43 +30,56 @@ function Get-GuiProgressText {
     }
 }
 
-function New-GuiProgressCallback {
-    # Builds the progress callback handed to the encoder. Everything it touches is passed in as a
-    # parameter (see the notes at the top of this file). $Ui is a hashtable with the controls
-    # BarFile, BarAll, CapFile, CapAll, DetFile, DetAll, Status, a Pump script block that lets the
-    # window repaint, and LastError.
+# Progress and cancel callbacks. These are deliberately NOT closures. A closure only captures the
+# variables of the function that creates it (that caused "The property 'Value' cannot be found" in
+# the first release), and in some PowerShell versions it cannot call this script's functions either.
+# Instead Start-Batch stores the context for the current file in script-scope variables, and the
+# script blocks it hands to the encoder are plain one-liners that call the functions below.
+$script:GuiProgress = $null
+$script:GuiCancel = $null
+
+function Set-GuiProgressContext {
+    # $Ui is a hashtable with the controls BarFile, BarAll, CapFile, CapAll, DetFile, DetAll, Status,
+    # a Pump script block that lets the window repaint, and LastError.
     param($Ui, $Item, [int]$Index, [int]$Total, [double]$Quality, $Tracker)
-    $callback = {
-        param($pct, $pass, $speed)
-        try {
-            Update-EtaProgress -Tracker $Tracker -Pass $pass -Percent $pct
-            $snap = Get-EtaSnapshot -Tracker $Tracker
-            $t = Get-GuiProgressText -Snapshot $snap -Pass $pass -Percent $pct -Index $Index -Total $Total -Quality $Quality -Speed $speed -FileName $Item.Info.FileName
-            $Item.Status = $t.RowStatus
-            $Item.Row.SubItems[8].Text = $t.RowStatus
-            $Ui.BarFile.Value = [int][math]::Max(0, [math]::Min(100, $snap.FilePercent))
-            $Ui.BarAll.Value  = [int][math]::Max(0, [math]::Min(100, $snap.QueuePercent))
-            $Ui.CapFile.Text  = $t.CapFile
-            $Ui.CapAll.Text   = $t.CapAll
-            $Ui.DetFile.Text  = $t.DetFile
-            $Ui.DetAll.Text   = $t.DetAll
-            $Ui.Status.Text   = $t.Status
-            & $Ui.Pump
-        } catch {
-            # A cosmetic update must never abort an encode. The batch loop logs this afterwards.
-            $Ui.LastError = $_.Exception.Message
-        }
-    }.GetNewClosure()
-    return $callback
+    $script:GuiProgress = @{ Ui = $Ui; Item = $Item; Index = $Index; Total = $Total; Quality = $Quality; Tracker = $Tracker }
 }
 
-function New-GuiCancelCheck {
+function Set-GuiCancelContext {
     param($Ui, $State)
-    $check = {
-        try { & $Ui.Pump } catch { }
-        return [bool]$State.Cancel
-    }.GetNewClosure()
-    return $check
+    $script:GuiCancel = @{ Ui = $Ui; State = $State }
+}
+
+function Update-GuiProgress {
+    param($pct, $pass, $speed)
+    $c = $script:GuiProgress
+    if ($null -eq $c) { return }
+    $Ui = $c.Ui
+    try {
+        Update-EtaProgress -Tracker $c.Tracker -Pass $pass -Percent $pct
+        $snap = Get-EtaSnapshot -Tracker $c.Tracker
+        $t = Get-GuiProgressText -Snapshot $snap -Pass $pass -Percent $pct -Index $c.Index -Total $c.Total -Quality $c.Quality -Speed $speed -FileName $c.Item.Info.FileName
+        $c.Item.Status = $t.RowStatus
+        $c.Item.Row.SubItems[8].Text = $t.RowStatus
+        $Ui.BarFile.Value = [int][math]::Max(0, [math]::Min(100, $snap.FilePercent))
+        $Ui.BarAll.Value  = [int][math]::Max(0, [math]::Min(100, $snap.QueuePercent))
+        $Ui.CapFile.Text  = $t.CapFile
+        $Ui.CapAll.Text   = $t.CapAll
+        $Ui.DetFile.Text  = $t.DetFile
+        $Ui.DetAll.Text   = $t.DetAll
+        $Ui.Status.Text   = $t.Status
+        & $Ui.Pump
+    } catch {
+        # A cosmetic update must never abort an encode. The batch loop logs this afterwards.
+        $Ui.LastError = $_.Exception.Message
+    }
+}
+
+function Test-GuiCancelRequested {
+    $c = $script:GuiCancel
+    if ($null -eq $c) { return $false }
+    try { & $c.Ui.Pump } catch { }
+    return [bool]$c.State.Cancel
 }
 
 function Set-GuiIdle {
@@ -486,8 +499,10 @@ function Show-CompressorWindow {
                 try {
                     $outPath = Get-OutputPath -InputPath $item.Path -Settings $s -Plan $item.Plan -BatchTime $batchTime
                     $state.OutputDir = Split-Path -Parent $outPath
-                    $onProgress = New-GuiProgressCallback -Ui $ui -Item $item -Index $n -Total $todo.Count -Quality ([double]$s.quality) -Tracker $tracker
-                    $shouldCancel = New-GuiCancelCheck -Ui $ui -State $state
+                    Set-GuiProgressContext -Ui $ui -Item $item -Index $n -Total $todo.Count -Quality ([double]$s.quality) -Tracker $tracker
+                    Set-GuiCancelContext -Ui $ui -State $state
+                    $onProgress = { param($pct, $pass, $speed) Update-GuiProgress $pct $pass $speed }
+                    $shouldCancel = { Test-GuiCancelRequested }
                     $result = Invoke-CompressVideo -Info $item.Info -Plan $item.Plan -OutputPath $outPath -Settings $s -OnProgress $onProgress -ShouldCancel $shouldCancel
                     $item.Result = $result
                     $learn = ($result.Status -eq 'Done')

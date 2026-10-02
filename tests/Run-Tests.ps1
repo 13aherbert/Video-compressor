@@ -238,14 +238,14 @@ $sn = Get-EtaSnapshot $t2 -At 50
 Assert-True ([math]::Abs($sn.QueueRemaining - 100) -lt 0.01) 'two files of 100 s left at 2 pass-seconds per second'
 
 Write-Host 'window text and callbacks (tested without a window)'
-$pumped = @{ N = 0 }
+$script:PumpCount = 0
 function New-FakeUi {
     return @{
         BarFile = [PSCustomObject]@{ Value = 0 }; BarAll = [PSCustomObject]@{ Value = 0 }
         CapFile = [PSCustomObject]@{ Text = '' }; CapAll = [PSCustomObject]@{ Text = '' }
         DetFile = [PSCustomObject]@{ Text = '' }; DetAll = [PSCustomObject]@{ Text = '' }
         Status  = [PSCustomObject]@{ Text = '' }
-        Pump    = { $pumped.N++ }.GetNewClosure()
+        Pump    = { $script:PumpCount++ }
         LastError = ''
     }
 }
@@ -261,7 +261,11 @@ Start-EtaFile $cbTracker 1
 # Same shape as the real thing: the callback is built in one function and called from another that
 # the encoder runs, so any reliance on the builder's caller's variables would fail here.
 function Invoke-FakeEncoder { param([scriptblock]$OnProgress) & $OnProgress 25 1 '2.0x'; & $OnProgress 50 2 '1.5x'; & $OnProgress 100 0 '3.0x' }
-function Start-FakeBatch { $cb = New-GuiProgressCallback -Ui $fakeUi -Item $fakeItem -Index 1 -Total 4 -Quality 32 -Tracker $cbTracker; Invoke-FakeEncoder $cb }
+function Start-FakeBatch {
+    Set-GuiProgressContext -Ui $fakeUi -Item $fakeItem -Index 1 -Total 4 -Quality 32 -Tracker $cbTracker
+    $cb = { param($pct, $pass, $speed) Update-GuiProgress $pct $pass $speed }
+    Invoke-FakeEncoder $cb
+}
 Start-FakeBatch
 Assert-True ($fakeUi.LastError -eq '') "progress callback ran without errors ($($fakeUi.LastError))"
 Assert-True ($fakeUi.BarFile.Value -eq 100 -and $fakeUi.CapFile.Text -eq 'Current file: 100 %') "file bar and its label: $($fakeUi.BarFile.Value), '$($fakeUi.CapFile.Text)'"
@@ -269,18 +273,19 @@ Assert-True ($fakeUi.BarAll.Value -eq 50 -and $fakeUi.CapAll.Text -eq 'Whole que
 Assert-True ($fakeUi.DetFile.Text -like 'Elapsed *' -and $fakeUi.DetAll.Text -like 'Elapsed *') "elapsed and remaining lines: '$($fakeUi.DetFile.Text)' / '$($fakeUi.DetAll.Text)'"
 Assert-True ($fakeUi.Status.Text -eq 'File 2 of 4: a.mp4  (quality RF 32, 3.0x)') "status text: '$($fakeUi.Status.Text)'"
 Assert-True ($fakeItem.Row.SubItems[8].Text -eq 'encoding 100% (3.0x)') 'row status text updated'
-Assert-True ($pumped.N -eq 3) 'window repainted on every update'
+Assert-True ($script:PumpCount -eq 3) "window repainted on every update ($($script:PumpCount))"
 Set-GuiIdle $fakeUi
 Assert-True ($fakeUi.CapFile.Text -eq 'Current file' -and $fakeUi.CapAll.Text -eq 'Whole queue' -and $fakeUi.DetFile.Text -eq '' -and $fakeUi.BarAll.Value -eq 0) 'idle state of the progress area'
 
 $brokenUi = @{ BarFile = $null; BarAll = $null; CapFile = $null; CapAll = $null; DetFile = $null; DetAll = $null; Status = $null; Pump = { }; LastError = '' }
 $errorEscaped = $false
-try { $cb = New-GuiProgressCallback -Ui $brokenUi -Item $fakeItem -Index 0 -Total 1 -Quality 32 -Tracker $cbTracker; & $cb 10 2 '1x' } catch { $errorEscaped = $true }
+try { Set-GuiProgressContext -Ui $brokenUi -Item $fakeItem -Index 0 -Total 1 -Quality 32 -Tracker $cbTracker; Update-GuiProgress 10 2 '1x' } catch { $errorEscaped = $true }
 Assert-True (-not $errorEscaped) 'a window problem never aborts an encode'
 Assert-True ($brokenUi.LastError -ne '') 'the window problem is recorded for the log'
 
 $cancelState = @{ Cancel = $false }
-$check = New-GuiCancelCheck -Ui $fakeUi -State $cancelState
+Set-GuiCancelContext -Ui $fakeUi -State $cancelState
+$check = { Test-GuiCancelRequested }
 Assert-True ((& $check) -eq $false) 'cancel check is false at first'
 $cancelState.Cancel = $true
 Assert-True ((& $check) -eq $true) 'cancel check turns true after Cancel is clicked'
@@ -288,8 +293,13 @@ Assert-True ((& $check) -eq $true) 'cancel check turns true after Cancel is clic
 $conTracker = New-EtaTracker -Durations @(60) -Mode quality
 Start-EtaFile $conTracker 0
 $conErr = $null
-try { $cb = New-ConsoleProgressCallback -Tracker $conTracker -Activity 'Test' -Position 1 -Total 1; & $cb 40 0 '2x'; Write-Progress -Activity 'Test' -Completed } catch { $conErr = $_.Exception.Message }
-Assert-True ($null -eq $conErr) "console progress callback ran ($conErr)"
+try {
+    Set-ConsoleProgressContext -Tracker $conTracker -Activity 'Test' -Position 1 -Total 1
+    $cb = { param($pct, $pass, $speed) Update-ConsoleProgress $pct $pass $speed }
+    & $cb 40 0 '2x'
+    Write-Progress -Activity 'Test' -Completed
+} catch { $conErr = $_.Exception.Message }
+Assert-True ($null -eq $conErr -and $script:ConsoleProgress.LastError -eq '') "console progress callback ran without errors ($conErr $($script:ConsoleProgress.LastError))"
 
 Write-Host 'helpers'
 Assert-True ((ConvertTo-Fps '30000/1001') -eq 29.97) 'fps 30000/1001'
@@ -437,7 +447,7 @@ if ((Test-IsWindows) -and $ExecutionContext.SessionState.LanguageMode -eq 'FullL
         $guiClip = Join-Path $guiDir 'Clip.mp4'
         Copy-Item -LiteralPath (Join-Path $fixtures 'clip 1080p30 (20s).mp4') -Destination $guiClip
         $guiSettings = New-TestSettings @{ targetMB = 3; speed = 'fast'; fileName = '{source}_{height}p' }
-        $seen = @{}
+        $seen = @{ Error = '' }
         try {
             Show-CompressorWindow -Files @() -Settings $guiSettings -Automation {
                 param($w)
@@ -457,7 +467,7 @@ if ((Test-IsWindows) -and $ExecutionContext.SessionState.LanguageMode -eq 'FullL
                 $seen.BadExample = $w.Controls.Example.Text
             }
         } catch { $seen.Error = $_.Exception.Message }
-        Assert-True (-not $seen.ContainsKey('Error')) "the window ran a whole batch without an error ($($seen.Error))"
+        Assert-True ($seen.Error -eq '') "the window ran a whole batch without an error ($($seen.Error))"
         Assert-True ($seen.MenuItems -eq 11 -and $seen.IdleCaption -eq 'Whole queue') 'the Variables menu lists 11 variables; idle caption'
         Assert-True ($seen.Added -eq 1 -and $seen.Example -like '*Encoded*Clip_720p.mp4') "live example before starting: $($seen.Example)"
         Assert-True ($seen.Status -like 'Done*') "file finished: $($seen.Status)"

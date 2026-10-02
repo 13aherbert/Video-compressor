@@ -199,25 +199,34 @@ function Format-EtaLine {
     return ('Elapsed {0}   {1}' -f (Format-Clock $Elapsed), $left)
 }
 
-function New-ConsoleProgressCallback {
-    # Progress callback for console mode. Everything it needs is passed in (see New-GuiProgressCallback
-    # in Gui.ps1 for why): it shows the encoder pass, percentage, and elapsed / remaining time for the
-    # current file and for the whole queue.
+# Console progress. There are no closures here on purpose: a closure cannot reliably call other
+# functions of this script in every PowerShell version. Instead Main.ps1 sets the context for the
+# current file, and the callback it hands to the encoder is a plain script block that calls
+# Update-ConsoleProgress, which reads that context.
+$script:ConsoleProgress = $null
+
+function Set-ConsoleProgressContext {
     param($Tracker, [string]$Activity, [int]$Position, [int]$Total)
-    $callback = {
-        param($pct, $pass, $speed)
-        try {
-            Update-EtaProgress -Tracker $Tracker -Pass $pass -Percent $pct
-            $snap = Get-EtaSnapshot -Tracker $Tracker
-            $label = 'pass 1 of 2 (analysing)'
-            if ($pass -eq 0) { $label = 'encoding at your quality setting' }
-            if ($pass -eq 2) { $label = 'pass 2 of 2 (encoding)' }
-            $detail = ('This file: {0}   |   Whole queue, file {1} of {2}: {3}' -f
-                (Format-EtaLine $snap.FileElapsed $snap.FileRemaining), $Position, $Total,
-                (Format-EtaLine $snap.QueueElapsed $snap.QueueRemaining))
-            Write-Progress -Activity $Activity -Status ("$label  $([math]::Round($pct))%  $speed") `
-                           -CurrentOperation $detail -PercentComplete ([int][math]::Max(0, [math]::Min(100, $pct)))
-        } catch { }
-    }.GetNewClosure()
-    return $callback
+    $script:ConsoleProgress = @{ Tracker = $Tracker; Activity = $Activity; Position = $Position; Total = $Total; LastError = '' }
+}
+
+function Update-ConsoleProgress {
+    # Shows the encoder pass, percentage, and elapsed / remaining time for this file and the whole queue.
+    param($pct, $pass, $speed)
+    $c = $script:ConsoleProgress
+    if ($null -eq $c) { return }
+    try {
+        Update-EtaProgress -Tracker $c.Tracker -Pass $pass -Percent $pct
+        $snap = Get-EtaSnapshot -Tracker $c.Tracker
+        $label = 'pass 1 of 2 (analysing)'
+        if ($pass -eq 0) { $label = 'encoding at your quality setting' }
+        if ($pass -eq 2) { $label = 'pass 2 of 2 (encoding)' }
+        $detail = ('This file: {0}   |   Whole queue, file {1} of {2}: {3}' -f
+            (Format-EtaLine $snap.FileElapsed $snap.FileRemaining), $c.Position, $c.Total,
+            (Format-EtaLine $snap.QueueElapsed $snap.QueueRemaining))
+        Write-Progress -Activity $c.Activity -Status ("$label  $([math]::Round($pct))%  $speed") `
+                       -CurrentOperation $detail -PercentComplete ([int][math]::Max(0, [math]::Min(100, $pct)))
+    } catch {
+        $c.LastError = $_.Exception.Message
+    }
 }
