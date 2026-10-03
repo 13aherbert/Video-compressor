@@ -1,0 +1,15 @@
+{
+  "targetMB": 40,
+  "sizeUnitBytes": 1000000,
+  "safetyMarginPercent": 3,
+  "codec": "hevc",
+  "speed": "balanced",
+  "quality": 32,
+  "mode": "quality",
+  "audioKbps": 96,
+  "maxHeight": 0,
+  "outputFolder": "Encoded",
+  "fileName": "{source}",
+  "skipIfAlreadyUnderLimit": true,
+  "maxRetries": 2
+}

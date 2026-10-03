@@ -1,0 +1,118 @@
+name: Test and package
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test-windows:
+    timeout-minutes: 25
+    # Runs the real thing: Windows PowerShell 5.1 (what a locked-down work PC has) with the
+    # downloaded static ffmpeg, including end-to-end encodes.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download ffmpeg into bin
+        shell: powershell
+        run: .\tools\Get-FFmpeg.ps1
+      - name: Run tests under Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $PSVersionTable.PSVersion
+          .\tests\Run-Tests.ps1
+      - name: Console mode smoke test (no window)
+        shell: powershell
+        run: .\src\Main.ps1 -NoGui -NoPause -TargetMB 3 -Speed fast "tests\fixtures\clip 1080p30 (20s).mp4"
+
+  test-linux:
+    timeout-minutes: 25
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Run tests under PowerShell 7
+        shell: pwsh
+        run: ./tests/Run-Tests.ps1
+
+  package:
+    timeout-minutes: 25
+    needs: [test-windows]
+    # Runs on every push so the zip is built and checked before you ever publish a release.
+    # Only tags and manual runs upload it; only tags attach it to a release.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build zip with ffmpeg included
+        shell: powershell
+        run: .\tools\Build-Package.ps1
+      - name: Check the zip works as shipped
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dest = Join-Path $env:RUNNER_TEMP 'unzipped'
+          Expand-Archive -Path dist\Video-compressor-win64.zip -DestinationPath $dest
+          $app = Join-Path $dest 'Video-compressor'
+
+          foreach ($f in 'Compress-Videos.bat', 'Install.bat', 'src\Main.ps1', 'tools\Install.ps1', 'bin\ffmpeg.exe', 'bin\ffprobe.exe', 'bin\NOTICE.txt', 'settings.json') {
+            if (-not (Test-Path (Join-Path $app $f))) { throw "Missing from zip: $f" }
+          }
+
+          # Run each tool without a truncating pipe: "| Select-Object -First 1" on a native program
+          # leaves a non-zero exit code in Windows PowerShell 5.1 and fails the whole step.
+          foreach ($tool in 'ffmpeg', 'ffprobe') {
+            $out = & (Join-Path $app "bin\$tool.exe") -version 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "$tool.exe from the zip failed to run (exit code $LASTEXITCODE)" }
+            @($out)[0]
+          }
+
+          # End to end: make a short clip with the shipped ffmpeg, then compress it with the shipped app.
+          $clip = Join-Path $env:RUNNER_TEMP 'smokeclip.mp4'
+          & (Join-Path $app 'bin\ffmpeg.exe') -hide_banner -loglevel error -y -f lavfi -i 'testsrc2=size=1280x720:rate=30' -f lavfi -i 'sine=frequency=440:sample_rate=48000' -t 3 -c:v libx264 -preset ultrafast -crf 10 -pix_fmt yuv420p -c:a aac $clip
+          if ($LASTEXITCODE -ne 0) { throw "Could not create the test clip (exit code $LASTEXITCODE)" }
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $app 'src\Main.ps1') -NoGui -NoPause -TargetMB 0.5 -Speed fast $clip
+          if ($LASTEXITCODE -ne 0) { throw "The shipped app failed (exit code $LASTEXITCODE)" }
+          # Default output: an Encoded folder next to the original, with the same name.
+          $result = Join-Path (Join-Path $env:RUNNER_TEMP 'Encoded') 'smokeclip.mp4'
+          if (-not (Test-Path $result)) { throw 'The shipped app produced no output file' }
+          $size = (Get-Item $result).Length
+          Write-Host "Compressed test clip: $size bytes (limit 500000)"
+          if ($size -le 0 -or $size -gt 500000) { throw "Output size $size is outside the 500000 byte limit" }
+
+          # The installer: install the shipped copy into a temp folder with fake Desktop and Send to
+          # folders, then compress a clip with the INSTALLED copy.
+          $inst = Join-Path $env:RUNNER_TEMP 'installed\Video Compressor'
+          $deskDir = Join-Path $env:RUNNER_TEMP 'fake-desktop'
+          $sendDir = Join-Path $env:RUNNER_TEMP 'fake-sendto'
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $app 'tools\Install.ps1') -Target $inst -DesktopDir $deskDir -SendToDir $sendDir
+          if ($LASTEXITCODE -ne 0) { throw "The shipped installer failed (exit code $LASTEXITCODE)" }
+          foreach ($f in 'Compress-Videos.bat', 'Uninstall.bat', 'src\Main.ps1', 'bin\ffmpeg.exe', 'settings.json') {
+            if (-not (Test-Path (Join-Path $inst $f))) { throw "Not installed: $f" }
+          }
+          foreach ($d in $deskDir, $sendDir) {
+            if (-not (Test-Path (Join-Path $d 'Video Compressor.lnk'))) { throw "No shortcut in $d" }
+          }
+          $clip2 = Join-Path $env:RUNNER_TEMP 'installclip.mp4'
+          Copy-Item -LiteralPath $clip -Destination $clip2
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $inst 'src\Main.ps1') -NoGui -NoPause -TargetMB 0.5 -Speed fast $clip2
+          if ($LASTEXITCODE -ne 0) { throw "The installed copy failed (exit code $LASTEXITCODE)" }
+          $installedResult = Join-Path (Join-Path $env:RUNNER_TEMP 'Encoded') 'installclip.mp4'
+          if (-not (Test-Path $installedResult)) { throw 'The installed copy produced no output file' }
+          Write-Host "Installed copy compressed its clip: $((Get-Item $installedResult).Length) bytes"
+          exit 0
+      - uses: actions/upload-artifact@v4
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        with:
+          name: Video-compressor-win64
+          path: dist/*.zip
+      - name: Attach to GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
