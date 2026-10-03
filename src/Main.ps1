@@ -190,7 +190,7 @@ try {
         Write-Host ''
         Write-Host 'ffmpeg is missing and could not be downloaded.' -ForegroundColor Red
         Write-Host 'On a computer with internet access, run this program once so it can download ffmpeg,'
-        Write-Host 'then copy the whole folder (including "bin") to this computer or your flash drive.'
+        Write-Host 'then copy the whole folder (including "bin") to this computer or a flash drive.'
         Write-Host 'Or download Video-compressor-win64.zip from the GitHub Releases page, which already includes it.'
         $exitCode = 1
     } elseif (-not $NoGui -and (Test-GuiAvailable)) {

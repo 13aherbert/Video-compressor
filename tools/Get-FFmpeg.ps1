@@ -4,7 +4,7 @@
 
 .DESCRIPTION
     Run this once on a computer with internet access (your home PC), then copy the
-    whole folder to the flash drive. The build is a plain .exe with no installer,
+    whole folder to the computer or flash drive you will use it on. The build is a plain .exe with no installer,
     no .NET and no registry use, so it runs on a locked-down work PC.
 
     Tries, in order: gyan.dev "release-essentials" (stable URL, ~115 MB), then the
@@ -96,4 +96,4 @@ if ($env:OS -eq 'Windows_NT') {
         if (-not ($encoders -match "\b$needed\b")) { Write-Warning "This build lacks the $needed encoder; choose a different download with -Url." }
     }
 }
-Write-Host 'Done. Copy the whole folder to your flash drive.'
+Write-Host 'Done. You can now copy the whole folder to another computer or a flash drive.'

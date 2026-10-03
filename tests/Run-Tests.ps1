@@ -195,6 +195,99 @@ $m = Read-TestSettings '{ "targetMB": 30 }'
 Assert-True ($m.outputFolder -eq 'Encoded' -and $m.fileName -eq '{source}') 'missing keys use the defaults'
 Remove-Item -LiteralPath $tmpRoot -Recurse -Force -ErrorAction SilentlyContinue
 
+Write-Host 'installing on a computer instead of a flash drive'
+$instRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('vc-install-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+$repoRoot = Split-Path -Parent $srcCore | Split-Path -Parent
+$installer = Join-Path (Join-Path $repoRoot 'tools') 'Install.ps1'
+$hostForInstall = (Get-Process -Id $PID).Path
+function Invoke-Installer {
+    param([string[]]$Arguments, [string]$Script = $installer)
+    $a = @('-NoProfile')
+    if (Test-IsWindows) { $a += @('-ExecutionPolicy', 'Bypass') }
+    $a += @('-File', $Script) + $Arguments
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    $text = (& $hostForInstall @a 2>&1 | ForEach-Object { "$_" }) -join "`n"
+    $code = $LASTEXITCODE
+    $ErrorActionPreference = $prev
+    return [PSCustomObject]@{ Code = $code; Text = $text }
+}
+$deskA = Join-Path $instRoot 'DesktopA'; $sendA = Join-Path $instRoot 'SendToA'
+$app = Join-Path $instRoot 'Video Compressor'
+$common = @('-DesktopDir', $deskA, '-SendToDir', $sendA)
+$r = Invoke-Installer (@('-Target', $app) + $common)
+Assert-True ($r.Code -eq 0 -and $r.Text -match 'Installed\.') "fresh install succeeds ($($r.Code)) $(if ($r.Code -ne 0) { $r.Text })"
+foreach ($rel in 'Compress-Videos.bat', 'src\Main.ps1', 'src\Gui.ps1', 'tools\Install.ps1', 'bin\NOTICE.txt', 'Uninstall.bat', 'settings.json', 'README.md', 'LICENSE') {
+    Assert-True (Test-Path -LiteralPath (Join-Path $app $rel)) "installed: $rel"
+}
+Assert-True ((Test-Path -LiteralPath (Join-Path $app 'logs')) -and -not (Test-Path -LiteralPath (Join-Path $app 'tests')) -and -not (Test-Path -LiteralPath (Join-Path $app '.git'))) 'logs folder created; tests and .git are not copied'
+$installedBat = Join-Path $app 'Compress-Videos.bat'
+$shortcutOk = $false
+foreach ($dir in $deskA, $sendA) {
+    $lnk = Join-Path $dir 'Video Compressor.lnk'; $cmd = Join-Path $dir 'Video Compressor.cmd'
+    if (Test-Path -LiteralPath $lnk) {
+        $shortcutOk = ((New-Object -ComObject WScript.Shell).CreateShortcut($lnk).TargetPath -eq $installedBat)
+    } elseif (Test-Path -LiteralPath $cmd) {
+        $shortcutOk = ((Get-Content -LiteralPath $cmd -Raw) -like "*$installedBat*")
+    } else { $shortcutOk = $false }
+    Assert-True $shortcutOk "shortcut in $(Split-Path -Leaf $dir) points at the installed launcher"
+}
+
+Set-Content -LiteralPath (Join-Path $app 'settings.json') -Value '{ "targetMB": 25 }'
+Set-Content -LiteralPath (Join-Path (Join-Path $app 'logs') 'mine.txt') -Value 'keep me'
+Set-Content -LiteralPath (Join-Path (Join-Path $app 'src') 'OLD-REMOVED-FILE.ps1') -Value 'stale'
+$r = Invoke-Installer (@('-Target', $app) + $common)
+Assert-True ($r.Code -eq 0) 'installing again over an existing install succeeds'
+Assert-True ((Get-Content -LiteralPath (Join-Path $app 'settings.json') -Raw).Trim() -eq '{ "targetMB": 25 }') 'an update keeps your settings'
+Assert-True (Test-Path -LiteralPath (Join-Path (Join-Path $app 'logs') 'mine.txt')) 'an update keeps your logs'
+Assert-True (-not (Test-Path -LiteralPath (Join-Path (Join-Path $app 'src') 'OLD-REMOVED-FILE.ps1'))) 'an update removes files that no longer exist'
+
+$r = Invoke-Installer @('-Target', $repoRoot, '-NoSmokeTest') 
+Assert-True ($r.Code -ne 0 -and $r.Text -match 'folder being installed from') 'refuses to install onto itself'
+$r = Invoke-Installer @('-Target', (Join-Path (Join-Path $repoRoot 'src') 'inside'), '-NoSmokeTest')
+Assert-True ($r.Code -ne 0 -and $r.Text -match 'folder being installed from') 'refuses to install inside the source folder'
+$other = Join-Path $instRoot 'SomeoneElsesFolder'
+New-Item -ItemType Directory -Path $other -Force | Out-Null
+Set-Content -LiteralPath (Join-Path $other 'precious.txt') -Value 'do not touch'
+$r = Invoke-Installer (@('-Target', $other) + $common + '-NoSmokeTest')
+Assert-True ($r.Code -ne 0 -and $r.Text -match 'other files' -and (Get-Content -LiteralPath (Join-Path $other 'precious.txt') -Raw).Trim() -eq 'do not touch' -and @(Get-ChildItem -LiteralPath $other).Count -eq 1) 'refuses a folder that holds other files, and leaves it untouched'
+$driveRoot = [System.IO.Path]::GetPathRoot($instRoot)
+$r = Invoke-Installer (@('-Target', $driveRoot) + $common + '-NoSmokeTest')
+Assert-True ($r.Code -ne 0 -and $r.Text -match 'drive root') 'refuses a drive root'
+$aFile = Join-Path $instRoot 'iamafile'
+Set-Content -LiteralPath $aFile -Value 'x'
+$r = Invoke-Installer (@('-Target', $aFile) + $common + '-NoSmokeTest')
+Assert-True ($r.Code -ne 0 -and $r.Text -match 'file with that name') 'refuses a path that is a file'
+
+$app2 = Join-Path $instRoot 'Second Choice'
+$unusable = Join-Path $aFile 'cannot-be-a-folder'
+$deskB = Join-Path $instRoot 'DesktopB'; $sendB = Join-Path $instRoot 'SendToB'
+$r = Invoke-Installer @('-Candidates', "$other|$unusable|$app2", '-DesktopDir', $deskB, '-SendToDir', $sendB)
+if ($r.Code -ne 0) { Write-Host $r.Text }
+Assert-True ($r.Code -eq 0 -and (Test-Path -LiteralPath (Join-Path $app2 'Compress-Videos.bat')) -and $r.Text -match 'skipped' -and $r.Text -match 'did not work') 'skips an unusable folder and a folder with other files, then uses the next one'
+Assert-True (-not (Test-Path -LiteralPath $unusable)) 'a failed attempt leaves nothing behind'
+$r = Invoke-Installer @('-Candidates', "$other|$unusable", '-DesktopDir', $deskB, '-SendToDir', $sendB)
+Assert-True ($r.Code -ne 0 -and $r.Text -match 'Could not install') 'says so plainly when no folder works'
+
+$app3 = Join-Path $instRoot 'No Shortcuts'
+$deskC = Join-Path $instRoot 'DesktopC'; $sendC = Join-Path $instRoot 'SendToC'
+$r = Invoke-Installer @('-Target', $app3, '-DesktopDir', $deskC, '-SendToDir', $sendC, '-NoDesktop', '-NoSendTo')
+Assert-True ($r.Code -eq 0 -and -not (Test-Path -LiteralPath $deskC) -and -not (Test-Path -LiteralPath $sendC)) '-NoDesktop and -NoSendTo create no shortcuts'
+
+# Uninstall
+$r = Invoke-Installer @('-Uninstall', '-Yes')
+Assert-True ($r.Code -ne 0 -and $r.Text -match 'not put there by the installer' -and (Test-Path -LiteralPath (Join-Path $repoRoot 'src\Main.ps1'))) 'uninstall refuses a portable or source folder'
+$strangerCmd = Join-Path $deskA 'Video Compressor.cmd'
+Remove-Item -LiteralPath (Join-Path $deskA 'Video Compressor.lnk'), $strangerCmd -Force -ErrorAction SilentlyContinue
+Set-Content -LiteralPath $strangerCmd -Value '@call "C:\somewhere\else.bat" %*'
+$r = Invoke-Installer (@('-Uninstall', '-Yes') + $common) -Script (Join-Path (Join-Path $app 'tools') 'Install.ps1')
+Assert-True ($r.Code -eq 0) "uninstall from the installed copy succeeds ($($r.Code)) $(if ($r.Code -ne 0) { $r.Text })"
+$waited = 0
+while ((Test-Path -LiteralPath $app) -and $waited -lt 30) { Start-Sleep -Seconds 1; $waited++ }
+Assert-True (-not (Test-Path -LiteralPath $app)) 'the install folder is removed'
+Assert-True (-not (Test-Path -LiteralPath (Join-Path $sendA 'Video Compressor.lnk')) -and -not (Test-Path -LiteralPath (Join-Path $sendA 'Video Compressor.cmd'))) 'its Send to entry is removed'
+Assert-True (Test-Path -LiteralPath $strangerCmd) 'a shortcut of the same name that points somewhere else is left alone'
+Remove-Item -LiteralPath $instRoot -Recurse -Force -ErrorAction SilentlyContinue
+
 Write-Host 'time estimates (simulated clock)'
 Assert-True ((Format-Clock 1e12) -eq '100000:00:00') 'a silly-large time does not crash'
 Assert-True ((Format-Clock 42) -eq '0:42' -and (Format-Clock 725) -eq '12:05' -and (Format-Clock 3723) -eq '1:02:03') 'clock format'

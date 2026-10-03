@@ -60,7 +60,7 @@ jobs:
           Expand-Archive -Path dist\Video-compressor-win64.zip -DestinationPath $dest
           $app = Join-Path $dest 'Video-compressor'
 
-          foreach ($f in 'Compress-Videos.bat', 'src\Main.ps1', 'bin\ffmpeg.exe', 'bin\ffprobe.exe', 'bin\NOTICE.txt', 'settings.json') {
+          foreach ($f in 'Compress-Videos.bat', 'Install.bat', 'src\Main.ps1', 'tools\Install.ps1', 'bin\ffmpeg.exe', 'bin\ffprobe.exe', 'bin\NOTICE.txt', 'settings.json') {
             if (-not (Test-Path (Join-Path $app $f))) { throw "Missing from zip: $f" }
           }
 
@@ -84,6 +84,27 @@ jobs:
           $size = (Get-Item $result).Length
           Write-Host "Compressed test clip: $size bytes (limit 500000)"
           if ($size -le 0 -or $size -gt 500000) { throw "Output size $size is outside the 500000 byte limit" }
+
+          # The installer: install the shipped copy into a temp folder with fake Desktop and Send to
+          # folders, then compress a clip with the INSTALLED copy.
+          $inst = Join-Path $env:RUNNER_TEMP 'installed\Video Compressor'
+          $deskDir = Join-Path $env:RUNNER_TEMP 'fake-desktop'
+          $sendDir = Join-Path $env:RUNNER_TEMP 'fake-sendto'
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $app 'tools\Install.ps1') -Target $inst -DesktopDir $deskDir -SendToDir $sendDir
+          if ($LASTEXITCODE -ne 0) { throw "The shipped installer failed (exit code $LASTEXITCODE)" }
+          foreach ($f in 'Compress-Videos.bat', 'Uninstall.bat', 'src\Main.ps1', 'bin\ffmpeg.exe', 'settings.json') {
+            if (-not (Test-Path (Join-Path $inst $f))) { throw "Not installed: $f" }
+          }
+          foreach ($d in $deskDir, $sendDir) {
+            if (-not (Test-Path (Join-Path $d 'Video Compressor.lnk'))) { throw "No shortcut in $d" }
+          }
+          $clip2 = Join-Path $env:RUNNER_TEMP 'installclip.mp4'
+          Copy-Item -LiteralPath $clip -Destination $clip2
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $inst 'src\Main.ps1') -NoGui -NoPause -TargetMB 0.5 -Speed fast $clip2
+          if ($LASTEXITCODE -ne 0) { throw "The installed copy failed (exit code $LASTEXITCODE)" }
+          $installedResult = Join-Path (Join-Path $env:RUNNER_TEMP 'Encoded') 'installclip.mp4'
+          if (-not (Test-Path $installedResult)) { throw 'The installed copy produced no output file' }
+          Write-Host "Installed copy compressed its clip: $((Get-Item $installedResult).Length) bytes"
           exit 0
       - uses: actions/upload-artifact@v4
         if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'

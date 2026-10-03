@@ -34,7 +34,49 @@ Downloaded the repository as a plain "Download ZIP" instead? That works too: the
 run `Compress-Videos.bat` on a computer with internet, it downloads ffmpeg into `bin\` by itself
 (about 115 MB, once). Do that at home, then copy the finished folder to the flash drive.
 
-## Daily use (on the work PC)
+## Install on your computer (no flash drive needed)
+
+The tool runs from any folder you can write to, so you can keep it on the work PC itself.
+
+1. Get `Video-compressor-win64.zip` onto the computer (download it, or copy it over from a flash drive).
+2. Right-click the zip, choose **Properties**, tick **Unblock**, click OK. Unzip it anywhere, for example
+   in Downloads.
+3. Double-click **`Install.bat`** inside the unzipped folder.
+
+The installer needs no admin rights and changes nothing in the registry. It:
+
+- tries these folders in order and uses the first one Windows allows programs to run from:
+  `%LOCALAPPDATA%\Video Compressor` (usually `C:\Users\<you>\AppData\Local\Video Compressor`), then
+  `%USERPROFILE%\Video Compressor`, then `Documents\Video Compressor`;
+- copies the app there and checks that ffmpeg and the app really start from that folder;
+- puts a **Video Compressor** icon on your Desktop and a **Video Compressor** entry in the right-click
+  **Send to** menu;
+- writes an `Uninstall.bat` into the install folder.
+
+Afterwards, start it from the Desktop icon, or select videos or folders in Explorer, right-click, choose
+**Send to**, then **Video Compressor**, and they load straight into the window. Send to hands the file
+names over on a command line, which Windows limits to roughly 8,000 characters. A few dozen files is
+fine; for hundreds, drag the folder onto the window instead.
+
+**Updating:** download the new zip and run its `Install.bat` again. Your settings and logs are kept; the
+program files are replaced. Close the Video Compressor window first.
+
+**Uninstalling:** run `Uninstall.bat` in the install folder. It asks first, removes the two shortcuts and
+the folder, and never touches your compressed videos (those are in your own `Encoded` folders). It refuses
+to delete any folder that was not put there by the installer.
+
+**If the PC will not allow it:** some company policies only let programs run from approved places. The
+installer then says exactly what Windows refused, removes the half-made copy, and leaves nothing behind.
+You can keep using the flash drive, or ask IT to allow one of the folders above. To choose another
+folder yourself, run
+`powershell -ExecutionPolicy Bypass -File tools\Install.ps1 -Target "D:\Tools\Video Compressor"`.
+The installer will not use a drive root, the Windows folder, your Desktop or Documents folder
+themselves, or a folder that already holds other files.
+
+If you would rather not install anything, the portable folder still works exactly as before: just run
+`Compress-Videos.bat` from wherever the folder is.
+
+## Daily use
 
 1. Plug in the drive and double-click `Compress-Videos.bat`, or drop video files or a folder
    straight onto the `.bat` file.

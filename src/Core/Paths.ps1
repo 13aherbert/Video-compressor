@@ -25,7 +25,7 @@ function Get-ToolExe {
     $cmd = Get-Command $Name -ErrorAction SilentlyContinue
     if ($cmd) { return $cmd.Source }
     throw ("Could not find $exe in the 'bin' folder. On a computer with internet access, run " +
-           "tools\Get-FFmpeg.ps1 once to download it, then copy the whole folder to your flash drive.")
+           "tools\Get-FFmpeg.ps1 once to download it, then copy the whole folder to the computer or flash drive you want to use it on.")
 }
 
 function Get-FFmpegPath  { return (Get-ToolExe -Name 'ffmpeg') }
